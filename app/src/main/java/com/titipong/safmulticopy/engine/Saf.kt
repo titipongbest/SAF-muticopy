@@ -77,6 +77,39 @@ object Saf {
         return out
     }
 
+    data class FileInfo(val name: String, val size: Long, val mtime: Long)
+
+    /** Name, size and time of a single picked document (columns looked up by name; some providers lack some). */
+    fun fileInfo(cr: ContentResolver, uri: Uri): FileInfo? = runCatching {
+        cr.query(uri, null, null, null, null)?.use { c ->
+            if (!c.moveToFirst()) return@use null
+            val iName = c.getColumnIndex(Document.COLUMN_DISPLAY_NAME)
+            val iSize = c.getColumnIndex(Document.COLUMN_SIZE)
+            val iTime = c.getColumnIndex(Document.COLUMN_LAST_MODIFIED)
+            val name = if (iName >= 0) c.getString(iName) else null
+            if (name.isNullOrBlank()) return@use null
+            FileInfo(
+                name = name,
+                size = if (iSize >= 0 && !c.isNull(iSize)) c.getLong(iSize) else 0L,
+                mtime = if (iTime >= 0 && !c.isNull(iTime)) c.getLong(iTime) else 0L,
+            )
+        }
+    }.getOrNull()
+
+    /** Where a picked file lives: "Internal storage › Download", "Downloads", … */
+    fun fileLocationLabel(uri: Uri): String = when (uri.authority) {
+        "com.android.externalstorage.documents" -> {
+            val id = runCatching { DocumentsContract.getDocumentId(uri) }.getOrDefault("")
+            val vol = id.substringBefore(':')
+            val parent = id.substringAfter(':', "").substringBeforeLast('/', "").trim('/')
+            val volLabel = if (vol == "primary") "Internal storage" else "Drive $vol"
+            if (parent.isEmpty()) volLabel else "$volLabel › " + parent.replace("/", " › ")
+        }
+        "com.android.providers.downloads.documents" -> "Downloads"
+        "com.android.providers.media.documents" -> "Media"
+        else -> uri.authority ?: ""
+    }
+
     fun displayName(cr: ContentResolver, tree: Uri): String? = runCatching {
         cr.query(docUri(tree, rootId(tree)), arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null)
             ?.use { if (it.moveToFirst()) it.getString(0) else null }

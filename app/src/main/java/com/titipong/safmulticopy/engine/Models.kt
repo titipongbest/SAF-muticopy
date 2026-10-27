@@ -10,6 +10,8 @@ data class LogLine(val text: String, val level: Level)
 
 data class CopyRequest(
     val sources: List<Uri>,
+    /** Individually picked files; copied straight into the destination folder. */
+    val files: List<Uri>,
     val destination: Uri,
     val threads: Int,
     val retries: Int,

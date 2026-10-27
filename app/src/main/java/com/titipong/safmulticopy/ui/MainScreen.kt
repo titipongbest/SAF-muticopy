@@ -128,6 +128,9 @@ fun MainScreen(vm: MainViewModel) {
     val pickSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) vm.addSource(uri)?.let { errorText = it }
     }
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) vm.addFiles(uris)?.let { errorText = it }
+    }
     val pickDest = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) vm.setDestinationUri(uri)?.let { errorText = it }
     }
@@ -187,10 +190,14 @@ fun MainScreen(vm: MainViewModel) {
             }
             item(key = "sources") {
                 SourcesCard(
-                    sources = vm.sources,
+                    folders = vm.sources,
+                    files = vm.files,
                     enabled = !running,
-                    onAdd = { pickSource.launch(null) },
-                    onRemove = vm::removeSource,
+                    onAddFolder = { pickSource.launch(null) },
+                    onAddFiles = { pickFiles.launch(arrayOf("*/*")) },
+                    onRemoveFolder = vm::removeSource,
+                    onRemoveFile = vm::removeFile,
+                    onClearFiles = vm::clearFiles,
                 )
             }
             item(key = "dest") {
@@ -236,7 +243,7 @@ fun MainScreen(vm: MainViewModel) {
     errorText?.let { msg ->
         AlertDialog(
             onDismissRequest = { errorText = null },
-            title = { Text("Can't start") },
+            title = { Text("Heads up") },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { errorText = null }) { Text("OK") } },
         )
@@ -305,7 +312,7 @@ private fun FolderRow(ref: FolderRef, emoji: String, onRemove: (() -> Unit)?) {
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                ref.location,
+                if (ref.isFile) "${formatSize(ref.size)} · ${ref.location}" else ref.location,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -324,38 +331,94 @@ private fun FolderRow(ref: FolderRef, emoji: String, onRemove: (() -> Unit)?) {
 
 @Composable
 private fun SourcesCard(
-    sources: List<FolderRef>,
+    folders: List<FolderRef>,
+    files: List<FolderRef>,
     enabled: Boolean,
-    onAdd: () -> Unit,
-    onRemove: (FolderRef) -> Unit,
+    onAddFolder: () -> Unit,
+    onAddFiles: () -> Unit,
+    onRemoveFolder: (FolderRef) -> Unit,
+    onRemoveFile: (FolderRef) -> Unit,
+    onClearFiles: () -> Unit,
 ) {
+    var showAllFiles by remember { mutableStateOf(false) }
+    val summary = listOfNotNull(
+        folders.size.takeIf { it > 0 }?.let { "$it folder${if (it > 1) "s" else ""}" },
+        files.size.takeIf { it > 0 }?.let {
+            "${formatCount(it)} file${if (it > 1) "s" else ""} (${formatSize(files.sumOf { f -> f.size })})"
+        },
+    ).joinToString(" · ")
+
     SectionCard(
-        title = "Source folders",
-        subtitle = if (sources.isEmpty()) "Internal storage, SD card or USB OTG" else "${sources.size} selected",
+        title = "Copy from",
+        subtitle = summary.ifEmpty { "Folders or files — internal storage, SD card or USB OTG" },
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            sources.forEach { ref ->
-                FolderRow(ref, "📁", if (enabled) ({ onRemove(ref) }) else null)
+            folders.forEach { ref ->
+                FolderRow(ref, "📁", if (enabled) ({ onRemoveFolder(ref) }) else null)
             }
-            FilledTonalButton(
-                onClick = onAdd,
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) {
-                Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Add source folder")
+
+            val visible = if (showAllFiles) files else files.take(FILES_PREVIEW)
+            visible.forEach { ref ->
+                FolderRow(ref, "📄", if (enabled) ({ onRemoveFile(ref) }) else null)
+            }
+            if (files.size > FILES_PREVIEW || (files.size > 1 && enabled)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (files.size > FILES_PREVIEW) {
+                        TextButton(onClick = { showAllFiles = !showAllFiles }) {
+                            Text(if (showAllFiles) "Show less" else "Show all ${formatCount(files.size)} files")
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (enabled && files.size > 1) {
+                        TextButton(onClick = onClearFiles) {
+                            Text("Remove all files", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = onAddFolder,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f).height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Folder")
+                }
+                FilledTonalButton(
+                    onClick = onAddFiles,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f).height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                ) {
+                    Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Files")
+                }
+            }
+            if (files.isEmpty() && enabled) {
+                Text(
+                    "Files: long-press to select several at once",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
 }
 
+private const val FILES_PREVIEW = 5
+
 @Composable
 private fun DestinationCard(dest: FolderRef?, enabled: Boolean, onPick: () -> Unit) {
     SectionCard(
         title = "Destination",
-        subtitle = "Each source is copied into its own folder here",
+        subtitle = "Folders are copied into their own sub-folder · files go straight here",
     ) {
         if (dest == null) {
             Button(

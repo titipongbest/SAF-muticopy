@@ -71,7 +71,7 @@ class CopyEngine(
     private class Target(val destTree: Uri, val name: String, val dirIds: ConcurrentHashMap<String, String>)
 
     private class CopyJob(
-        val srcTree: Uri,
+        val srcUri: Uri,
         val src: FileRec,
         val target: Target,
         val parentKey: String,
@@ -151,6 +151,11 @@ class CopyEngine(
             plans += buildPlan(srcTree, destTree, name, existing?.docId, src, dest)
         }
 
+        if (req.files.isNotEmpty()) {
+            currentCoroutineContext().ensureActive()
+            plans += planPickedFiles(destTree, destRootId, destChildren, names)
+        }
+
         filesToCopy = plans.sumOf { it.jobs.size }
         bytesToCopy = plans.sumOf { p -> p.jobs.sumOf { it.src.size } }
         log(
@@ -225,15 +230,16 @@ class CopyEngine(
                     log("  ✖ Mismatch: \"${f.rel}\" is a file in source but a folder in destination", Level.ERROR)
                     failed.incrementAndGet()
                 } else {
-                    jobs += CopyJob(srcTree, f, target, parent, null) // folder is removed by mirror first
+                    // the folder is removed by mirror first
+                    jobs += CopyJob(Saf.docUri(srcTree, f.docId), f, target, parent, null)
                 }
                 continue
             }
             val d = dest.files[k]
             when {
-                d == null -> jobs += CopyJob(srcTree, f, target, parent, null)
+                d == null -> jobs += CopyJob(Saf.docUri(srcTree, f.docId), f, target, parent, null)
                 d.size != f.size || f.mtime > d.mtime + MTIME_TOLERANCE_MS ->
-                    jobs += CopyJob(srcTree, f, target, parent, d.docId)
+                    jobs += CopyJob(Saf.docUri(srcTree, f.docId), f, target, parent, d.docId)
                 else -> {
                     skipped.incrementAndGet()
                     if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
@@ -252,6 +258,59 @@ class CopyEngine(
         val deletions = if (req.mirror) extras(src, dest) else emptyList()
         return Plan(target, jobs, dirsToCreate, deletions)
     }
+
+    /**
+     * Individually picked files go straight into the destination folder.
+     * Mirror never deletes anything here — it only applies inside the source folders' targets.
+     */
+    private fun planPickedFiles(
+        destTree: Uri,
+        destRootId: String,
+        destChildren: List<DocEntry>,
+        folderTargets: List<String>,
+    ): Plan {
+        message = "Checking selected files…"
+        log("[Files] ${formatCount(req.files.size)} selected → destination folder", Level.HEAD)
+        val target = Target(destTree, "", ConcurrentHashMap(mapOf("" to destRootId)))
+        val destFiles = destChildren.filter { !it.isDir }.associateBy { it.name.lowercase() }
+        val takenByFolders = destChildren.filter { it.isDir }.map { it.name.lowercase() }.toSet() +
+            folderTargets.map { it.lowercase() }
+        val seen = HashSet<String>()
+        val jobs = ArrayList<CopyJob>()
+        for (uri in req.files) {
+            val info = Saf.fileInfo(cr, uri)
+            if (info == null) {
+                failed.incrementAndGet()
+                log("  ✖ Cannot read a selected file (it may have been moved or deleted)", Level.ERROR)
+                continue
+            }
+            val key = info.name.lowercase()
+            if (!seen.add(key)) {
+                failed.incrementAndGet()
+                log("  ✖ Two selected files are both named \"${info.name}\" — only the first is copied", Level.ERROR)
+                continue
+            }
+            if (key in takenByFolders) {
+                failed.incrementAndGet()
+                log("  ✖ \"${info.name}\": a folder with this name exists in the destination", Level.ERROR)
+                continue
+            }
+            val f = FileRec(info.name, info.name, "", info.size, info.mtime)
+            val d = destFiles[key]
+            when {
+                d == null -> jobs += CopyJob(uri, f, target, "", null)
+                d.size != f.size || f.mtime > d.mtime + MTIME_TOLERANCE_MS ->
+                    jobs += CopyJob(uri, f, target, "", d.docId)
+                else -> {
+                    skipped.incrementAndGet()
+                    if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
+                }
+            }
+        }
+        return Plan(target, jobs, emptyList(), emptyList())
+    }
+
+    private fun label(target: Target, rel: String) = if (target.name.isEmpty()) rel else "${target.name}/$rel"
 
     /** Destination items that are not in the source. Folders are deleted as a whole. */
     private fun extras(src: ScanResult, dest: ScanResult): List<Pair<String, String>> {
@@ -277,7 +336,7 @@ class CopyEngine(
         message = "Removing extra files…"
         for (p in plans) for ((rel, id) in p.deletions) {
             currentCoroutineContext().ensureActive()
-            val label = "${p.target.name}/$rel"
+            val label = label(p.target, rel)
             if (req.dryRun) {
                 deleted.incrementAndGet()
                 log("  − Would delete: $label", Level.WARN)
@@ -326,7 +385,7 @@ class CopyEngine(
     // ------------------------------------------------------------------ copying
 
     private suspend fun process(worker: Int, job: CopyJob, buf: ByteArray) {
-        val label = "${job.target.name}/${job.src.rel}"
+        val label = label(job.target, job.src.rel)
         val size = job.src.size
         current[worker] = job.src.rel
         try {
@@ -390,7 +449,7 @@ class CopyEngine(
         var ok = false
         try {
             val ctx = currentCoroutineContext()
-            cr.openInputStream(Saf.docUri(job.srcTree, job.src.docId)).use { input ->
+            cr.openInputStream(job.srcUri).use { input ->
                 if (input == null) throw IOException("cannot open source")
                 cr.openOutputStream(out, "w").use { output ->
                     if (output == null) throw IOException("cannot open destination")

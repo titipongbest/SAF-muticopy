@@ -18,7 +18,13 @@ import com.titipong.safmulticopy.engine.GlobSet
 import com.titipong.safmulticopy.engine.Saf
 import kotlinx.coroutines.flow.StateFlow
 
-data class FolderRef(val uri: Uri, val name: String, val location: String)
+data class FolderRef(
+    val uri: Uri,
+    val name: String,
+    val location: String,
+    val isFile: Boolean = false,
+    val size: Long = 0,
+)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val settings = Settings(app)
@@ -26,6 +32,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val rw = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
 
     val sources = mutableStateListOf<FolderRef>()
+    val files = mutableStateListOf<FolderRef>()
     var destination by mutableStateOf<FolderRef?>(null)
         private set
 
@@ -43,6 +50,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Only restore folders we still have permission for (the user may have revoked it).
         val granted = cr.persistedUriPermissions.filter { it.isReadPermission }.map { it.uri }.toSet()
         settings.sources.map(Uri::parse).filter { it in granted }.forEach { sources += describe(it) }
+        settings.files.map(Uri::parse).filter { it in granted }.forEach { uri ->
+            describeFile(uri)?.let { files += it }
+        }
         settings.destination?.let(Uri::parse)?.takeIf { it in granted }?.let { destination = describe(it) }
     }
 
@@ -59,6 +69,59 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         save()
     }
 
+    /**
+     * Android keeps only a limited number of saved file permissions per app (128 before
+     * Android 11, 512 after) and silently drops the oldest — which could include the folder
+     * permissions. Picked files are therefore capped; for more, add the folder instead.
+     */
+    private val maxFiles = if (android.os.Build.VERSION.SDK_INT >= 30) 400 else 100
+
+    fun addFiles(uris: List<Uri>): String? {
+        var skippedOverLimit = 0
+        var unreadable = 0
+        for (uri in uris) {
+            if (files.any { it.uri == uri }) continue
+            if (files.size >= maxFiles) {
+                skippedOverLimit++
+                continue
+            }
+            runCatching { cr.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val ref = describeFile(uri)
+            if (ref == null) {
+                unreadable++
+                releaseFile(uri)
+                continue
+            }
+            files += ref
+        }
+        save()
+        return buildList {
+            if (skippedOverLimit > 0) {
+                add(
+                    "$skippedOverLimit file(s) were not added: up to $maxFiles single files can be selected. " +
+                        "For more, add their folder instead.",
+                )
+            }
+            if (unreadable > 0) add("$unreadable file(s) could not be read and were skipped.")
+        }.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
+    }
+
+    fun removeFile(ref: FolderRef) {
+        files.remove(ref)
+        releaseFile(ref.uri)
+        save()
+    }
+
+    fun clearFiles() {
+        files.forEach { releaseFile(it.uri) }
+        files.clear()
+        save()
+    }
+
+    private fun releaseFile(uri: Uri) {
+        runCatching { cr.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+    }
+
     fun setDestinationUri(uri: Uri): String? {
         if (!takePermission(uri)) return "Could not get permission for this folder."
         val old = destination
@@ -70,6 +133,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun save() {
         settings.sources = sources.map { it.uri.toString() }
+        settings.files = files.map { it.uri.toString() }
         settings.destination = destination?.uri?.toString()
         settings.threads = threads
         settings.retries = retries
@@ -82,7 +146,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Returns an error message, or null when the job can start. */
     fun validate(): String? {
-        if (sources.isEmpty()) return "Add at least one source folder."
+        if (sources.isEmpty() && files.isEmpty()) return "Add at least one folder or file to copy."
         val dest = destination ?: return "Choose a destination folder."
         for (s in sources) {
             if (s.uri.authority != dest.uri.authority) continue
@@ -108,6 +172,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             getApplication(),
             CopyRequest(
                 sources = sources.map { it.uri },
+                files = files.map { it.uri },
                 destination = dest.uri,
                 threads = threads,
                 retries = retries,
@@ -134,6 +199,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun releaseIfUnused(uri: Uri) {
         if (sources.any { it.uri == uri } || destination?.uri == uri) return
         runCatching { cr.releasePersistableUriPermission(uri, rw) }
+    }
+
+    private fun describeFile(uri: Uri): FolderRef? {
+        val info = Saf.fileInfo(cr, uri) ?: return null
+        return FolderRef(uri, info.name, Saf.fileLocationLabel(uri), isFile = true, size = info.size)
     }
 
     private fun describe(uri: Uri) = FolderRef(

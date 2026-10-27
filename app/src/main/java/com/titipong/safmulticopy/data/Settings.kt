@@ -10,6 +10,10 @@ class Settings(context: Context) {
         get() = p.getString("sources", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         set(v) = p.edit { putString("sources", v.joinToString("\n")) }
 
+    var files: List<String>
+        get() = p.getString("files", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+        set(v) = p.edit { putString("files", v.joinToString("\n")) }
+
     var destination: String?
         get() = p.getString("destination", null)
         set(v) = p.edit { putString("destination", v) }
