@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Two stacked folders with a forward arrow, inside the 66dp safe zone -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- back folder -->
+    <path
+        android:fillColor="#93C5FD"
+        android:pathData="M30,36 L42,36 L46,40 L62,40 Q66,40 66,44 L66,62 Q66,66 62,66 L34,66 Q30,66 30,62 Z" />
+    <!-- front folder -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,44 L52,44 L56,48 L74,48 Q78,48 78,52 L78,72 Q78,76 74,76 L44,76 Q40,76 40,72 Z" />
+    <!-- arrow -->
+    <path
+        android:fillColor="#2563EB"
+        android:pathData="M50,59 L62,59 L62,54 L70,62 L62,70 L62,65 L50,65 Z" />
+</vector>
