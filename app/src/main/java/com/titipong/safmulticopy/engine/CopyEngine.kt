@@ -108,7 +108,7 @@ class CopyEngine(
     private var logFile: File? = null
 
     private val eventLock = Any()
-    private val events = ArrayDeque<FileEvent>()
+    private val eventsByTask = LinkedHashMap<String, ArrayDeque<FileEvent>>()
     private var eventSeq = 0L
 
     /** What one parallel worker is doing right now (drives one progress bar). */
@@ -138,18 +138,18 @@ class CopyEngine(
 
     private fun event(kind: EventKind, path: String, size: Long, detail: String? = null) {
         synchronized(eventLock) {
-            events.addFirst(
+            val list = eventsByTask.getOrPut(task.id ?: QUICK_KEY) { ArrayDeque() }
+            list.addFirst(
                 FileEvent(
                     id = eventSeq++,
                     kind = kind,
                     name = path.substringAfterLast('/'),
                     path = path,
                     size = size,
-                    group = if (req.tasks.size > 1) task.label else null,
                     detail = detail,
                 ),
             )
-            while (events.size > MAX_EVENTS) events.removeLast()
+            while (list.size > MAX_EVENTS) list.removeLast()
         }
     }
 
@@ -805,7 +805,7 @@ class CopyEngine(
     }
 
     private fun publishNow() {
-        val recent = synchronized(eventLock) { events.toList() }
+        val recent = synchronized(eventLock) { eventsByTask.mapValues { it.value.toList() } }
         val done = finishedAt > 0
         val t = task
         publish(
@@ -837,7 +837,7 @@ class CopyEngine(
                 taskId = t.id,
                 pendingIds = if (done) emptyList() else req.tasks.drop(taskIndex + 1).mapNotNull { it.id },
                 results = results.toList(),
-                events = recent,
+                eventsByTask = recent,
                 logFile = logFile?.absolutePath,
             ),
         )

@@ -3,12 +3,15 @@ package com.titipong.safmulticopy.data
 import android.content.Context
 import android.net.Uri
 import androidx.core.content.edit
+import com.titipong.safmulticopy.engine.EventKind
+import com.titipong.safmulticopy.engine.FileEvent
 import com.titipong.safmulticopy.engine.TaskResult
 import com.titipong.safmulticopy.util.resultSummary
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
+import java.io.File
 import org.json.JSONObject
 
 /** A saved source → destination with its own options. */
@@ -33,9 +36,13 @@ data class FolderPair(
     val destUri: Uri get() = Uri.parse(destination)
 }
 
+/** The files of a pair's last sync, shown when the pair is opened. */
+data class PairRecent(val finishedAt: Long, val logFile: String?, val events: List<FileEvent>)
+
 /** Folder pairs, kept as JSON in SharedPreferences and shared by the UI and the service. */
 class PairStore private constructor(context: Context) {
     private val prefs = context.getSharedPreferences("pairs", Context.MODE_PRIVATE)
+    private val recentDir = File(context.filesDir, "pair_recent")
     private val _pairs = MutableStateFlow(load())
     val pairs: StateFlow<List<FolderPair>> = _pairs.asStateFlow()
 
@@ -43,7 +50,58 @@ class PairStore private constructor(context: Context) {
         if (list.any { it.id == p.id }) list.map { if (it.id == p.id) p else it } else list + p
     }
 
-    fun delete(id: String) = update { list -> list.filterNot { it.id == id } }
+    fun delete(id: String) {
+        update { list -> list.filterNot { it.id == id } }
+        runCatching { recentFile(id).delete() }
+    }
+
+    private fun recentFile(id: String) = File(recentDir, id.replace(Regex("[^A-Za-z0-9-]"), "_") + ".json")
+
+    fun saveRecent(id: String, r: PairRecent) {
+        runCatching {
+            recentDir.mkdirs()
+            val arr = JSONArray()
+            r.events.forEach { e ->
+                arr.put(
+                    JSONObject()
+                        .put("id", e.id)
+                        .put("kind", e.kind.name)
+                        .put("name", e.name)
+                        .put("path", e.path)
+                        .put("size", e.size)
+                        .put("detail", e.detail ?: JSONObject.NULL),
+                )
+            }
+            val o = JSONObject()
+                .put("finishedAt", r.finishedAt)
+                .put("logFile", r.logFile ?: JSONObject.NULL)
+                .put("events", arr)
+            recentFile(id).writeText(o.toString())
+        }
+    }
+
+    fun loadRecent(id: String): PairRecent? = runCatching {
+        val f = recentFile(id)
+        if (!f.exists()) return null
+        val o = JSONObject(f.readText())
+        val arr = o.getJSONArray("events")
+        PairRecent(
+            finishedAt = o.optLong("finishedAt"),
+            logFile = if (o.isNull("logFile")) null else o.optString("logFile"),
+            events = (0 until arr.length()).mapNotNull { i ->
+                val e = arr.getJSONObject(i)
+                val kind = runCatching { EventKind.valueOf(e.getString("kind")) }.getOrNull() ?: return@mapNotNull null
+                FileEvent(
+                    id = e.optLong("id"),
+                    kind = kind,
+                    name = e.optString("name"),
+                    path = e.optString("path"),
+                    size = e.optLong("size"),
+                    detail = if (e.isNull("detail")) null else e.optString("detail"),
+                )
+            },
+        )
+    }.getOrNull()
 
     fun setSelected(id: String, selected: Boolean) = update { list ->
         list.map { if (it.id == id) it.copy(selected = selected) else it }

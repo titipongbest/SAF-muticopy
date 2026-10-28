@@ -2,6 +2,18 @@
 
 package com.titipong.safmulticopy.ui
 
+import kotlin.math.roundToInt
+import com.titipong.safmulticopy.util.resultSummary
+import com.titipong.safmulticopy.util.formatSize
+import com.titipong.safmulticopy.util.formatCount
+import com.titipong.safmulticopy.engine.Phase
+import com.titipong.safmulticopy.data.PairRecent
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -69,7 +81,7 @@ internal fun LazyListScope.pairItems(
     enabled: Boolean,
     onToggle: (FolderPair, Boolean) -> Unit,
     onSelectAll: (Boolean) -> Unit,
-    onEdit: (FolderPair) -> Unit,
+    onOpen: (FolderPair) -> Unit,
     onSyncOne: (FolderPair) -> Unit,
     onNew: () -> Unit,
 ) {
@@ -100,7 +112,7 @@ internal fun LazyListScope.pairItems(
             queued = st.running && p.id in st.pendingIds,
             enabled = enabled,
             onToggle = { onToggle(p, it) },
-            onEdit = { onEdit(p) },
+            onOpen = { onOpen(p) },
             onSync = { onSyncOne(p) },
         )
     }
@@ -165,12 +177,12 @@ private fun PairCard(
     queued: Boolean,
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
-    onEdit: () -> Unit,
+    onOpen: () -> Unit,
     onSync: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     Card(
-        onClick = onEdit,
+        onClick = onOpen,
         enabled = enabled,
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -270,7 +282,7 @@ private fun Endpoint(emoji: String, name: String, location: String) {
 private fun PairStatus(pair: FolderPair, accessible: Boolean) {
     val cs = MaterialTheme.colorScheme
     val (text, color) = when {
-        !accessible -> "⚠ No access — tap to pick the folders again" to cs.error
+        !accessible -> "⚠ No access — open the pair and tap Edit" to cs.error
         pair.lastSyncAt == 0L -> "Never synced" to cs.onSurfaceVariant
         else -> {
             val ago = formatAgo(pair.lastSyncAt)
@@ -402,5 +414,196 @@ internal fun PairEditorSheet(
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )
+    }
+}
+
+// ---------------------------------------------------------------- details
+
+/**
+ * Everything about one pair: its folders, live progress while it syncs, and the files of
+ * this run or of its last sync. Recent files of other pairs / quick copy are never shown here.
+ */
+@Composable
+internal fun PairDetailSheet(
+    pair: FolderPair,
+    st: CopyState,
+    accessible: Boolean,
+    saved: PairRecent?,
+    onSync: () -> Unit,
+    onPreview: () -> Unit,
+    onEdit: () -> Unit,
+    onShareLog: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val cs = MaterialTheme.colorScheme
+    val active = st.running && st.taskId == pair.id
+    val queuePos = if (st.running) st.pendingIds.indexOf(pair.id) else -1
+    val liveResult = st.results.lastOrNull { it.id == pair.id }
+    val liveEvents = st.eventsFor(pair.id)
+    // This run's files if the pair is (or just was) part of it, otherwise the saved last sync.
+    val useLive = active || liveResult != null || liveEvents.isNotEmpty()
+    val events = if (useLive) liveEvents else saved?.events.orEmpty()
+    val logFile = (if (useLive) st.logFile.takeIf { !st.running } else saved?.logFile)
+        ?.takeIf { java.io.File(it).exists() }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = cs.surface) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    pair.name,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                if (pair.mirror) Badge("🪞 MIRROR", cs.error) else Badge("➕ MERGE", cs.primary)
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(cs.surfaceVariant)
+                    .padding(12.dp),
+            ) {
+                Endpoint("📁", pair.sourceName, pair.sourceLocation)
+                Text("↓", color = cs.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
+                Endpoint("💾", pair.destName, pair.destLocation)
+            }
+
+            // Status
+            when {
+                active -> ActivePairProgress(st)
+                queuePos >= 0 -> Badge("WAITING IN QUEUE · ${queuePos + 1} pair${if (queuePos > 0) "s" else ""} ahead", cs.onSurfaceVariant)
+                liveResult != null -> Text(
+                    (if (st.dryRun) "Preview: " else "This run: ") + resultSummary(liveResult, st.dryRun),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = when (liveResult.status) {
+                        TaskStatus.OK -> Success
+                        TaskStatus.ERRORS -> Warn
+                        else -> cs.error
+                    },
+                )
+                else -> PairStatus(pair, accessible)
+            }
+            if (active && !st.dryRun && st.phase == Phase.COPYING && st.slots.isNotEmpty()) {
+                WorkersCard(st)
+            }
+
+            // Recent files of this pair only
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Recent files", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            when {
+                                useLive && st.dryRun -> "From this preview"
+                                useLive -> if (active) "Updates as files finish" else "From this run"
+                                saved != null -> "From the last sync · ${formatAgo(saved.finishedAt)}"
+                                else -> "Sync this pair to see its files here"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                        )
+                    }
+                    if (logFile != null) {
+                        TextButton(onClick = { onShareLog(logFile) }) {
+                            Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Full log")
+                        }
+                    }
+                }
+                if (events.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    RecentFilesList(events)
+                }
+            }
+
+            // Actions
+            if (!st.running) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = onEdit,
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.Filled.Edit, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Edit")
+                    }
+                    OutlinedButton(
+                        onClick = onPreview,
+                        enabled = accessible,
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) { Text("Preview") }
+                    Button(
+                        onClick = onSync,
+                        enabled = accessible,
+                        modifier = Modifier.weight(1.2f).height(50.dp),
+                        shape = RoundedCornerShape(14.dp),
+                    ) {
+                        Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Sync")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActivePairProgress(st: CopyState) {
+    val cs = MaterialTheme.colorScheme
+    val fraction = when {
+        st.bytesToCopy > 0 -> (st.bytesDone.toFloat() / st.bytesToCopy).coerceIn(0f, 1f)
+        st.filesToCopy > 0 -> (st.filesDone.toFloat() / st.filesToCopy).coerceIn(0f, 1f)
+        else -> 0f
+    }
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Badge(if (st.dryRun) "PREVIEWING NOW" else "SYNCING NOW", cs.primary)
+            Spacer(Modifier.weight(1f))
+            if (st.phase == Phase.COPYING) {
+                Text("${(fraction * 100).roundToInt()}%", fontWeight = FontWeight.Bold, color = cs.primary)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        if (st.phase == Phase.COPYING) {
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                trackColor = cs.surfaceVariant,
+                strokeCap = StrokeCap.Round,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "${formatCount(st.filesDone)} / ${formatCount(st.filesToCopy)} files · " +
+                    "${formatSize(st.bytesDone)} / ${formatSize(st.bytesToCopy)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                trackColor = cs.surfaceVariant,
+                strokeCap = StrokeCap.Round,
+            )
+            if (st.message.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(st.message, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+        }
     }
 }

@@ -3,6 +3,7 @@ package com.titipong.safmulticopy.engine
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.titipong.safmulticopy.data.PairRecent
 import com.titipong.safmulticopy.data.PairStore
 import com.titipong.safmulticopy.service.CopyService
 import kotlinx.coroutines.CoroutineScope
@@ -55,7 +56,12 @@ object CopyManager {
             // Remember the outcome on each folder pair (not for previews).
             if (!req.dryRun) {
                 val s = _state.value
-                runCatching { PairStore.get(context).recordResults(s.results, s.finishedAt) }
+                val store = PairStore.get(context)
+                runCatching { store.recordResults(s.results, s.finishedAt) }
+                // Keep each pair's files so they can be viewed later by opening the pair.
+                s.results.mapNotNull { it.id }.distinct().forEach { id ->
+                    store.saveRecent(id, PairRecent(s.finishedAt, s.logFile, s.eventsFor(id)))
+                }
             }
         }
         job = j

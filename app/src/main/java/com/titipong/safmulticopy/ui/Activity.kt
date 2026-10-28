@@ -222,13 +222,15 @@ private fun matches(f: Filter, kind: EventKind): Boolean = when (f) {
 
 /** The latest files with a coloured status: copied, skipped, failed, deleted. */
 @Composable
-internal fun RecentFilesCard(st: CopyState, canShare: Boolean, onShare: () -> Unit) {
-    var filter by remember { mutableStateOf(Filter.ALL) }
-    val shown = st.events.filter { matches(filter, it.kind) }
-
+internal fun RecentFilesCard(
+    events: List<FileEvent>,
+    subtitle: String,
+    canShare: Boolean,
+    onShare: () -> Unit,
+) {
     SectionCard(
         title = "Recent files",
-        subtitle = if (st.phase == Phase.COPYING || st.finished) "Newest first" else "Updates as files finish",
+        subtitle = subtitle,
         trailing = {
             if (canShare) {
                 TextButton(onClick = onShare) {
@@ -239,6 +241,16 @@ internal fun RecentFilesCard(st: CopyState, canShare: Boolean, onShare: () -> Un
             }
         },
     ) {
+        RecentFilesList(events)
+    }
+}
+
+/** Filter chips + a fixed-height box of files that scrolls inside. */
+@Composable
+internal fun RecentFilesList(events: List<FileEvent>) {
+    var filter by remember { mutableStateOf(Filter.ALL) }
+    val shown = events.filter { matches(filter, it.kind) }
+    Column {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Filter.entries.forEach { f ->
                 FilterChipSmall(f.label, selected = f == filter) { filter = f }
@@ -326,7 +338,6 @@ private fun EventRow(e: FileEvent) {
                 e.detail?.let { append(" · $it") }
                 val folder = e.path.substringBeforeLast('/', "")
                 if (e.detail == null && folder.isNotEmpty()) append(" · $folder")
-                e.group?.let { append(" · $it") }
                 if (expanded && e.detail != null) append("\n${e.path}")
             }
             Text(

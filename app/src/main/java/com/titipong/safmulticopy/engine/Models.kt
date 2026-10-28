@@ -33,9 +33,11 @@ data class FileEvent(
     val name: String,
     val path: String,
     val size: Long,
-    val group: String?,
     val detail: String? = null,
 )
+
+/** Key for quick-copy events in [CopyState.eventsByTask] (folder pairs use their id). */
+const val QUICK_KEY = "quick"
 
 /**
  * One unit of work in the queue.
@@ -112,8 +114,8 @@ data class CopyState(
     val taskId: String? = null,
     val pendingIds: List<String> = emptyList(),
     val results: List<TaskResult> = emptyList(),
-    /** Newest first. */
-    val events: List<FileEvent> = emptyList(),
+    /** Recent files per task (pair id, or [QUICK_KEY]); newest first. */
+    val eventsByTask: Map<String, List<FileEvent>> = emptyMap(),
     val logFile: String? = null,
 ) {
     val running: Boolean
@@ -125,6 +127,13 @@ data class CopyState(
 
     val hasErrors: Boolean
         get() = failed > 0 || phase == Phase.FAILED || results.any { it.status == TaskStatus.FAILED }
+
+    /** Recent files of one folder pair (or quick copy when [pairId] is null). */
+    fun eventsFor(pairId: String?): List<FileEvent> = eventsByTask[pairId ?: QUICK_KEY].orEmpty()
+
+    /** This run came from folder pairs (not quick copy). */
+    val isPairRun: Boolean
+        get() = taskId != null
 
     /** True when the queue came from folder pairs (or has several tasks). */
     val isQueue: Boolean

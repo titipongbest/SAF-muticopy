@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import com.titipong.safmulticopy.data.FolderPair
+import com.titipong.safmulticopy.data.PairRecent
 import com.titipong.safmulticopy.data.PairStore
 import com.titipong.safmulticopy.data.Settings
 import com.titipong.safmulticopy.engine.CopyManager
@@ -337,6 +338,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         releaseIfUnused(p.destUri)
         releaseDraftPicks()
     }
+
+    /** Files of the pair's last sync (saved on disk). */
+    fun loadRecent(id: String): PairRecent? = pairStore.loadRecent(id)
 
     fun setPairSelected(id: String, selected: Boolean) = pairStore.setSelected(id, selected)
 

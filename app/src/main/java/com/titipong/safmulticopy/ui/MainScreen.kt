@@ -148,6 +148,7 @@ fun MainScreen(vm: MainViewModel) {
     var confirm by remember { mutableStateOf<MirrorConfirm?>(null) }
     var editing by remember { mutableStateOf<PairDraft?>(null) }
     var datePending by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var viewing by remember { mutableStateOf<String?>(null) } // id of the pair whose details are open
 
     /** Before a real copy: warn if files would get today's date instead of the original's. */
     fun withDateCheck(dryRun: Boolean, go: () -> Unit) {
@@ -278,21 +279,25 @@ fun MainScreen(vm: MainViewModel) {
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Progress, running bars and recent files.
+            // Progress, running bars and (quick copy only) recent files. Each tab shows only its own run.
             val statusItems: LazyListScope.() -> Unit = {
-                if (st.phase != Phase.IDLE) {
+                val mine = if (vm.tab == TAB_PAIRS) st.isPairRun else !st.isPairRun
+                if (mine && st.phase != Phase.IDLE) {
                     item(key = "progress") {
                         ProgressCard(st, onDismiss = vm::dismissResult)
                     }
                 }
                 // One running bar per parallel copy (not for previews — nothing is copied).
-                if (st.phase == Phase.COPYING && !st.dryRun && st.slots.isNotEmpty()) {
+                if (mine && st.phase == Phase.COPYING && !st.dryRun && st.slots.isNotEmpty()) {
                     item(key = "workers") { WorkersCard(st) }
                 }
-                if (st.events.isNotEmpty()) {
+                // Folder pairs show their recent files inside each pair (tap the pair).
+                val quickEvents = st.eventsFor(null)
+                if (vm.tab == TAB_QUICK && !st.isPairRun && quickEvents.isNotEmpty()) {
                     item(key = "recent") {
                         RecentFilesCard(
-                            st = st,
+                            events = quickEvents,
+                            subtitle = if (running) "Updates as files finish" else "Newest first",
                             canShare = !running && st.logFile != null,
                             onShare = { shareLog(context, st.logFile) },
                         )
@@ -309,7 +314,7 @@ fun MainScreen(vm: MainViewModel) {
                     enabled = !running,
                     onToggle = { p, sel -> vm.setPairSelected(p.id, sel) },
                     onSelectAll = vm::setAllPairsSelected,
-                    onEdit = { editing = vm.draftOf(it) },
+                    onOpen = { viewing = it.id },
                     onSyncOne = { startPairs(listOf(it), false) },
                     onNew = { editing = PairDraft() },
                 )
@@ -336,6 +341,30 @@ fun MainScreen(vm: MainViewModel) {
 
             item(key = "settings") { SettingsCard(vm, enabled = !running, onAllowDates = ::requestDateAccess) }
             item(key = "credit") { CreditFooter() }
+        }
+    }
+
+    viewing?.let { id ->
+        val pair = pairs.firstOrNull { it.id == id }
+        if (pair == null) {
+            LaunchedEffect(id) { viewing = null } // the pair was deleted
+        } else {
+            // Re-read the saved files when the pair finishes a sync.
+            val saved = remember(id, pair.lastSyncAt) { vm.loadRecent(id) }
+            PairDetailSheet(
+                pair = pair,
+                st = st,
+                accessible = vm.canAccess(pair),
+                saved = saved,
+                onSync = { startPairs(listOf(pair), false) },
+                onPreview = { startPairs(listOf(pair), true) },
+                onEdit = {
+                    viewing = null
+                    editing = vm.draftOf(pair)
+                },
+                onShareLog = { shareLog(context, it) },
+                onDismiss = { viewing = null },
+            )
         }
     }
 
@@ -718,6 +747,13 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
             if (st.finished && queue && st.results.isNotEmpty()) {
                 Spacer(Modifier.height(14.dp))
                 Text("Results", style = MaterialTheme.typography.labelLarge, color = cs.onSurfaceVariant)
+                if (st.isPairRun) {
+                    Text(
+                        "Tap a pair below to see its files",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(6.dp))
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     st.results.forEach { ResultRow(it, st.dryRun) }
