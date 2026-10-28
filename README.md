@@ -1,5 +1,7 @@
 # SAF MultiCopy
 
+**by NorthXbar**
+
 แอป Android สำหรับก๊อปปี้โฟลเดอร์จำนวนมากแบบขนาน (หลายไฟล์พร้อมกัน) ใช้ Storage Access Framework (SAF)
 จึงใช้ได้กับ **Internal storage, SD card และ USB OTG** โดยไม่ต้อง root
 แนวคิดเดียวกับ Robocopy GUI บน Windows
@@ -89,3 +91,7 @@ SAF เพียงอย่างเดียวตั้งวันที่�
 ```
 
 ไฟล์ log ของแต่ละงานเก็บไว้ใน `Android/data/com.titipong.safmulticopy/files/logs/` และกด Share จากในแอปได้
+
+---
+
+SAF MultiCopy · by **NorthXbar**

@@ -328,6 +328,7 @@ fun MainScreen(vm: MainViewModel) {
             }
 
             item(key = "settings") { SettingsCard(vm, enabled = !running, onAllowDates = ::requestDateAccess) }
+            item(key = "credit") { CreditFooter() }
         }
     }
 
@@ -888,5 +889,32 @@ private fun openAllFilesAccess(context: Context) {
         context.startActivity(direct)
     } catch (e: ActivityNotFoundException) {
         runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+    }
+}
+
+/** App name, version and credit at the bottom of the screen. */
+@Composable
+private fun CreditFooter() {
+    val context = LocalContext.current
+    val version = remember {
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull()
+    }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            "SAF MultiCopy" + (version?.let { " v$it" } ?: ""),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "by NorthXbar",
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
     }
 }
