@@ -203,6 +203,8 @@ private fun styleOf(kind: EventKind): KindStyle {
         EventKind.WOULD_COPY -> KindStyle("+", "Will copy", cs.primary)
         EventKind.WOULD_UPDATE -> KindStyle("↻", "Will update", Color(0xFF7C3AED))
         EventKind.WOULD_DELETE -> KindStyle("🗑", "Will delete", Warn)
+        EventKind.DATE_FIXED -> KindStyle("🕒", "Original date restored", Color(0xFF0F766E))
+        EventKind.WOULD_FIX_DATE -> KindStyle("🕒", "Date will be restored", Color(0xFF0F766E))
     }
 }
 

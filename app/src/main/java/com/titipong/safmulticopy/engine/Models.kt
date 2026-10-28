@@ -21,7 +21,10 @@ data class SlotState(
         get() = if (size > 0) (done.toFloat() / size).coerceIn(0f, 1f) else 0f
 }
 
-enum class EventKind { COPIED, UPDATED, SKIPPED, FAILED, DELETED, WOULD_COPY, WOULD_UPDATE, WOULD_DELETE }
+enum class EventKind {
+    COPIED, UPDATED, SKIPPED, FAILED, DELETED, DATE_FIXED,
+    WOULD_COPY, WOULD_UPDATE, WOULD_DELETE, WOULD_FIX_DATE,
+}
 
 /** A finished file shown in the "Recent files" list. */
 data class FileEvent(
@@ -60,6 +63,8 @@ data class CopyRequest(
     val retries: Int,
     val dryRun: Boolean,
     val showSkipped: Boolean,
+    /** Give copies the original's modified date (needs All files access). */
+    val keepDates: Boolean = true,
 )
 
 data class TaskResult(
@@ -90,6 +95,12 @@ data class CopyState(
     val skipped: Int = 0,
     val failed: Int = 0,
     val deleted: Int = 0,
+    /** Existing copies whose date was set back to the original's. */
+    val datesFixed: Int = 0,
+    /** Copies whose original date could not be set. */
+    val datesNotKept: Int = 0,
+    /** Keep original dates is on but All files access is not allowed. */
+    val datesUnavailable: Boolean = false,
     val slots: List<SlotState> = emptyList(),
     val startedAt: Long = 0,
     val copyStartedAt: Long = 0,

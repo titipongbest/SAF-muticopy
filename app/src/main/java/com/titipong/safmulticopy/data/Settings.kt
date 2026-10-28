@@ -39,6 +39,10 @@ class Settings(context: Context) {
         get() = p.getBoolean("keepScreenOn", true)
         set(v) = p.edit { putBoolean("keepScreenOn", v) }
 
+    var keepDates: Boolean
+        get() = p.getBoolean("keepDates", true)
+        set(v) = p.edit { putBoolean("keepDates", v) }
+
     var showSkipped: Boolean
         get() = p.getBoolean("showSkipped", false)
         set(v) = p.edit { putBoolean("showSkipped", v) }

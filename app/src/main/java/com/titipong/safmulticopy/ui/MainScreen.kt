@@ -3,11 +3,14 @@
 package com.titipong.safmulticopy.ui
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.annotation.RequiresApi
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -64,6 +67,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -75,6 +79,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.titipong.safmulticopy.MainViewModel
 import com.titipong.safmulticopy.PairDraft
@@ -114,6 +119,20 @@ fun MainScreen(vm: MainViewModel) {
     }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    // Coming back from the "All files access" settings screen (or any app) — re-check permissions.
+    LifecycleResumeEffect(Unit) {
+        vm.refreshDateAccess()
+        vm.refreshGrants()
+        onPauseOrDispose { }
+    }
+    val legacyStoragePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        vm.refreshDateAccess()
+    }
+    fun requestDateAccess() {
+        if (Build.VERSION.SDK_INT >= 30) openAllFilesAccess(context)
+        else legacyStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+    }
+
     LaunchedEffect(Unit) {
         vm.refreshGrants()
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -127,6 +146,12 @@ fun MainScreen(vm: MainViewModel) {
     var errorText by remember { mutableStateOf<String?>(null) }
     var confirm by remember { mutableStateOf<MirrorConfirm?>(null) }
     var editing by remember { mutableStateOf<PairDraft?>(null) }
+    var datePending by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    /** Before a real copy: warn if files would get today's date instead of the original's. */
+    fun withDateCheck(dryRun: Boolean, go: () -> Unit) {
+        if (!dryRun && vm.datesWillBeLost) datePending = go else go()
+    }
 
     // Quick copy pickers
     val pickSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -156,21 +181,29 @@ fun MainScreen(vm: MainViewModel) {
 
     fun startQuick(dryRun: Boolean) {
         val err = vm.validate()
-        when {
-            err != null -> errorText = err
-            !dryRun && vm.mirror -> confirm = MirrorConfirm(listOf("Quick copy")) { vm.start(false) }
-            else -> vm.start(dryRun)
+        if (err != null) {
+            errorText = err
+            return
+        }
+        withDateCheck(dryRun) {
+            if (!dryRun && vm.mirror) confirm = MirrorConfirm(listOf("Quick copy")) { vm.start(false) }
+            else vm.start(dryRun)
         }
     }
 
     fun startPairs(list: List<FolderPair>, dryRun: Boolean) {
         val err = vm.validatePairs(list)
         val mirrored = list.filter { it.mirror }
-        when {
-            err != null -> errorText = err
-            !dryRun && mirrored.isNotEmpty() ->
+        if (err != null) {
+            errorText = err
+            return
+        }
+        withDateCheck(dryRun) {
+            if (!dryRun && mirrored.isNotEmpty()) {
                 confirm = MirrorConfirm(mirrored.map { it.name }) { vm.syncPairs(list, false) }
-            else -> vm.syncPairs(list, dryRun)
+            } else {
+                vm.syncPairs(list, dryRun)
+            }
         }
     }
 
@@ -294,7 +327,7 @@ fun MainScreen(vm: MainViewModel) {
                 item(key = "quick-options") { QuickOptionsCard(vm, enabled = !running) }
             }
 
-            item(key = "settings") { SettingsCard(vm, enabled = !running) }
+            item(key = "settings") { SettingsCard(vm, enabled = !running, onAllowDates = ::requestDateAccess) }
         }
     }
 
@@ -350,6 +383,33 @@ fun MainScreen(vm: MainViewModel) {
         )
     }
 
+    datePending?.let { go ->
+        AlertDialog(
+            onDismissRequest = { datePending = null },
+            icon = { Text("🕒", fontSize = 28.sp) },
+            title = { Text("Keep the original dates?") },
+            text = {
+                Text(
+                    "To give copies the same date as the originals, this app needs \"All files access\". " +
+                        "Without it, copied files get today's date and photos may sort in the wrong order.\n\n" +
+                        "Tap Allow, switch on \"Allow access to manage all files\", then come back and start again.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    datePending = null
+                    requestDateAccess()
+                }) { Text("Allow") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    datePending = null
+                    go()
+                }) { Text("Copy with today's date") }
+            },
+        )
+    }
+
     errorText?.let { msg ->
         AlertDialog(
             onDismissRequest = { errorText = null },
@@ -400,7 +460,7 @@ private fun TabSwitcher(selected: Int, labels: List<String>, onSelect: (Int) -> 
 
 /** Settings shared by folder pairs and quick copy. */
 @Composable
-private fun SettingsCard(vm: MainViewModel, enabled: Boolean) {
+private fun SettingsCard(vm: MainViewModel, enabled: Boolean, onAllowDates: () -> Unit) {
     SectionCard(title = "Settings", subtitle = "Used by folder pairs and quick copy") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Parallel copies", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
@@ -433,6 +493,41 @@ private fun SettingsCard(vm: MainViewModel, enabled: Boolean) {
 
         HorizontalDivider(Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
 
+        SwitchRow(
+            title = "Keep original dates",
+            subtitle = when {
+                !vm.keepDates -> "Off — copies get today's date"
+                vm.hasDateAccess -> "Copies get the same modified date as the original ✓"
+                else -> "Needs \"All files access\" — tap Allow below"
+            },
+            checked = vm.keepDates,
+            enabled = enabled,
+        ) { vm.keepDates = it; vm.save() }
+        if (vm.keepDates && !vm.hasDateAccess) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Warn.copy(alpha = 0.10f))
+                    .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Without it, copied photos get today's date and may sort in the wrong order.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = onAllowDates,
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    modifier = Modifier.height(36.dp),
+                ) { Text("Allow") }
+            }
+        }
         SwitchRow(
             title = "Keep screen on",
             subtitle = "While copying (copy also continues with the screen off)",
@@ -610,6 +705,7 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
                 CountTile("Failed", st.failed, cs.error, Modifier.weight(1f))
                 CountTile(if (st.dryRun) "To delete" else "Deleted", st.deleted, Warn, Modifier.weight(1f))
             }
+            DateNotes(st)
 
             if (st.finished && queue && st.results.isNotEmpty()) {
                 Spacer(Modifier.height(14.dp))
@@ -748,4 +844,49 @@ private fun shareLog(context: Context, path: String?) {
         .putExtra(Intent.EXTRA_STREAM, uri)
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     context.startActivity(Intent.createChooser(send, "Share log"))
+}
+
+
+/** Notes about file dates under the counters. */
+@Composable
+private fun DateNotes(st: CopyState) {
+    val cs = MaterialTheme.colorScheme
+    val notes = buildList {
+        if (st.datesUnavailable) add("⚠ Original dates not kept — \"All files access\" is off (see Settings)" to Warn)
+        if (st.datesFixed > 0) {
+            add(
+                "🕒 ${formatCount(st.datesFixed)} earlier copies ${if (st.dryRun) "will get" else "got"} their original date back" to
+                    Color(0xFF0F766E),
+            )
+        }
+        if (st.datesNotKept > 0) add("⚠ Couldn't keep the original date on ${formatCount(st.datesNotKept)} files" to Warn)
+    }
+    if (notes.isEmpty()) return
+    Spacer(Modifier.height(8.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        notes.forEach { (text, color) ->
+            Text(
+                text,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (color == Warn) cs.onSurface else color,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(color.copy(alpha = 0.10f))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** Opens Android's "All files access" screen for this app. */
+@RequiresApi(30)
+private fun openAllFilesAccess(context: Context) {
+    val pkg = Uri.parse("package:${context.packageName}")
+    val direct = Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, pkg)
+    try {
+        context.startActivity(direct)
+    } catch (e: ActivityNotFoundException) {
+        runCatching { context.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) }
+    }
 }

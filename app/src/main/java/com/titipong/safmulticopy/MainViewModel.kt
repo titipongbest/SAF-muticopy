@@ -19,6 +19,7 @@ import com.titipong.safmulticopy.engine.CopyState
 import com.titipong.safmulticopy.engine.CopyTask
 import com.titipong.safmulticopy.engine.GlobSet
 import com.titipong.safmulticopy.engine.Saf
+import com.titipong.safmulticopy.util.FileDates
 import kotlinx.coroutines.flow.StateFlow
 import java.util.UUID
 
@@ -70,6 +71,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var retries by mutableIntStateOf(settings.retries)
     var keepScreenOn by mutableStateOf(settings.keepScreenOn)
     var showSkipped by mutableStateOf(settings.showSkipped)
+    var keepDates by mutableStateOf(settings.keepDates)
+
+    /** "All files access" (Android 11+) / storage permission — needed to keep original dates. */
+    var hasDateAccess by mutableStateOf(FileDates.hasAccess(app))
+        private set
+
+    fun refreshDateAccess() {
+        hasDateAccess = FileDates.hasAccess(getApplication())
+    }
+
+    /** True when a real copy would give files today's date instead of the original's. */
+    val datesWillBeLost: Boolean get() = keepDates && !hasDateAccess
 
     var grants by mutableStateOf(Grants())
         private set
@@ -190,6 +203,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         settings.mirror = mirror
         settings.keepScreenOn = keepScreenOn
         settings.showSkipped = showSkipped
+        settings.keepDates = keepDates
         settings.excludeFiles = excludeFiles
         settings.excludeDirs = excludeDirs
     }
@@ -237,6 +251,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 retries = retries,
                 dryRun = dryRun,
                 showSkipped = showSkipped,
+                keepDates = keepDates,
             ),
         )
     }
@@ -365,6 +380,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 retries = retries,
                 dryRun = dryRun,
                 showSkipped = showSkipped,
+                keepDates = keepDates,
             ),
         )
     }

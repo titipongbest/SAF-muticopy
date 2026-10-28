@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
+import com.titipong.safmulticopy.util.FileDates
 import com.titipong.safmulticopy.util.formatCount
 import com.titipong.safmulticopy.util.formatDuration
 import com.titipong.safmulticopy.util.formatSize
@@ -79,6 +80,13 @@ class CopyEngine(
     private val skipped = AtomicInteger()
     private val failed = AtomicInteger()
     private val deleted = AtomicInteger()
+    private val datesFixed = AtomicInteger()
+    private val datesNotKept = AtomicInteger()
+
+    /** Copies get the original's modified date (SAF alone can't; needs All files access). */
+    private val canSetDates = req.keepDates && FileDates.hasAccess(context)
+    private val datesUnavailable = req.keepDates && !canSetDates
+
     private val workerCount = req.threads.coerceIn(1, 32)
     private val slots = Array(workerCount) { Slot() }
     private val results = CopyOnWriteArrayList<TaskResult>()
@@ -145,12 +153,19 @@ class CopyEngine(
         @Volatile var existingDocId: String?,
     )
 
+    /** An existing, unchanged copy whose date is wrong (e.g. copied before dates were kept). */
+    private class DateFix(val docId: String, val mtime: Long, val label: String, val size: Long)
+
     private class Plan(
         val target: Target,
         val jobs: List<CopyJob>,
         val dirsToCreate: List<String>,
         val deletions: List<Pair<String, String>>,
+        val dateFixes: List<DateFix> = emptyList(),
     )
+
+    private fun needsDateFix(srcMtime: Long, destMtime: Long) =
+        canSetDates && srcMtime > 0 && kotlin.math.abs(srcMtime - destMtime) > MTIME_TOLERANCE_MS
 
     suspend fun run() = coroutineScope {
         openLog()
@@ -162,6 +177,9 @@ class CopyEngine(
         }
         try {
             log(if (req.dryRun) "PREVIEW — nothing will be copied or deleted" else "COPY", Level.HEAD)
+            if (datesUnavailable) {
+                log("⚠ Original dates can't be kept — allow 'All files access' in the app's settings", Level.WARN)
+            }
             for ((i, t) in req.tasks.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 runTask(i, t)
@@ -330,20 +348,47 @@ class CopyEngine(
         val all = plans.flatMap { it.jobs }
         if (all.isEmpty()) {
             log("  ✓ Nothing to copy — everything is up to date", Level.OK)
-            return
-        }
-
-        val queue = Channel<CopyJob>(Channel.UNLIMITED)
-        all.forEach { queue.trySend(it) }
-        queue.close()
-        coroutineScope {
-            repeat(workerCount) { worker ->
-                launch(Dispatchers.IO) {
-                    val buf = ByteArray(BUFFER_SIZE)
-                    for (job in queue) process(worker, job, buf)
+        } else {
+            val queue = Channel<CopyJob>(Channel.UNLIMITED)
+            all.forEach { queue.trySend(it) }
+            queue.close()
+            coroutineScope {
+                repeat(workerCount) { worker ->
+                    launch(Dispatchers.IO) {
+                        val buf = ByteArray(BUFFER_SIZE)
+                        for (job in queue) process(worker, job, buf)
+                    }
                 }
             }
         }
+
+        fixDates(plans, destTree)
+    }
+
+    /** Copies made earlier with the wrong date (e.g. today's) get the original's date back — no re-copy. */
+    private suspend fun fixDates(plans: List<Plan>, destTree: Uri) {
+        val fixes = plans.flatMap { it.dateFixes }
+        if (fixes.isEmpty()) return
+        message = "Restoring original dates…"
+        log("  Restoring original dates on ${formatCount(fixes.size)} existing files", Level.INFO)
+        for (fx in fixes) {
+            currentCoroutineContext().ensureActive()
+            when {
+                req.dryRun -> {
+                    datesFixed.incrementAndGet()
+                    event(EventKind.WOULD_FIX_DATE, fx.label, fx.size)
+                }
+                FileDates.set(Saf.docUri(destTree, fx.docId), fx.mtime) -> {
+                    datesFixed.incrementAndGet()
+                    event(EventKind.DATE_FIXED, fx.label, fx.size)
+                }
+                else -> {
+                    datesNotKept.incrementAndGet()
+                    log("  ⚠ Could not set the date of ${fx.label}", Level.WARN)
+                }
+            }
+        }
+        message = ""
     }
 
     // ------------------------------------------------------------------ planning
@@ -374,6 +419,7 @@ class CopyEngine(
         }
 
         val jobs = ArrayList<CopyJob>()
+        val dateFixes = ArrayList<DateFix>()
         for ((k, f) in src.files) {
             val parent = Saf.parentKey(k)
             if (k in blocked || parent in blocked || Saf.underAny(k, blocked)) {
@@ -401,6 +447,7 @@ class CopyEngine(
                     skipped.incrementAndGet()
                     event(EventKind.SKIPPED, label(target, f.rel), f.size)
                     if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
+                    if (needsDateFix(f.mtime, d.mtime)) dateFixes += DateFix(d.docId, f.mtime, label(target, f.rel), f.size)
                 }
             }
         }
@@ -414,7 +461,7 @@ class CopyEngine(
             .sortedBy { rel -> rel.count { it == '/' } }
 
         val deletions = if (mirror) extras(src, dest) else emptyList()
-        return Plan(target, jobs, dirsToCreate, deletions)
+        return Plan(target, jobs, dirsToCreate, deletions, dateFixes)
     }
 
     /**
@@ -436,6 +483,7 @@ class CopyEngine(
             folderTargets.map { it.lowercase() }
         val seen = HashSet<String>()
         val jobs = ArrayList<CopyJob>()
+        val dateFixes = ArrayList<DateFix>()
         for (uri in files) {
             val info = Saf.fileInfo(cr, uri)
             if (info == null) {
@@ -467,10 +515,11 @@ class CopyEngine(
                     skipped.incrementAndGet()
                     event(EventKind.SKIPPED, f.rel, f.size)
                     if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
+                    if (needsDateFix(f.mtime, d.mtime)) dateFixes += DateFix(d.docId, f.mtime, f.rel, f.size)
                 }
             }
         }
-        return Plan(target, jobs, emptyList(), emptyList())
+        return Plan(target, jobs, emptyList(), emptyList(), dateFixes)
     }
 
     private fun label(target: Target, rel: String) = if (target.name.isEmpty()) rel else "${target.name}/$rel"
@@ -638,6 +687,12 @@ class CopyEngine(
         } finally {
             if (!ok) runCatching { DocumentsContract.deleteDocument(cr, out) }
         }
+
+        // Give the copy the original's date (after the stream is closed, or closing resets it).
+        if (canSetDates && job.src.mtime > 0 && !FileDates.set(out, job.src.mtime)) {
+            datesNotKept.incrementAndGet()
+            log("  ⚠ Could not set the date of ${label(job.target, job.src.rel)}", Level.WARN)
+        }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -676,6 +731,9 @@ class CopyEngine(
                 skipped = skipped.get(),
                 failed = failed.get(),
                 deleted = deleted.get(),
+                datesFixed = datesFixed.get(),
+                datesNotKept = datesNotKept.get(),
+                datesUnavailable = datesUnavailable,
                 slots = if (done) emptyList() else slots.mapIndexed { i, s ->
                     SlotState(i, s.name, s.size, s.done.get(), s.retry, s.update)
                 },
