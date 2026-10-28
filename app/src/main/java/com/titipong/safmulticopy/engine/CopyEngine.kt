@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -86,6 +87,10 @@ class CopyEngine(
     /** Copies get the original's modified date (SAF alone can't; needs All files access). */
     private val canSetDates = req.keepDates && FileDates.hasAccess(context)
     private val datesUnavailable = req.keepDates && !canSetDates
+
+    /** Lets the app write by real path when SAF fails (some USB drives / SD cards). */
+    private val hasAllFilesAccess = FileDates.hasAccess(context)
+    private val directWrites = AtomicInteger()
 
     private val workerCount = req.threads.coerceIn(1, 32)
     private val slots = Array(workerCount) { Slot() }
@@ -658,14 +663,38 @@ class CopyEngine(
 
         // Replace = delete + create. Opening the old file with "w" does not truncate on every provider.
         job.existingDocId?.let { id ->
-            DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, id))
+            try {
+                DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, id))
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                // Same storage-service problem as below: overwrite the old copy by real path instead.
+                if (copyDirect(job, parentId, buf, onBytes)) {
+                    job.existingDocId = null
+                    return
+                }
+                throw e
+            }
             job.existingDocId = null
         }
 
         // octet-stream keeps the file name exactly as given (no extension is added).
-        val out = DocumentsContract.createDocument(
-            cr, Saf.docUri(destTree, parentId), "application/octet-stream", job.src.name,
-        ) ?: throw IOException("cannot create file")
+        val out = try {
+            DocumentsContract.createDocument(
+                cr, Saf.docUri(destTree, parentId), "application/octet-stream", job.src.name,
+            ) ?: throw IOException("cannot create file")
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            // Some phones' storage service can't see a folder it just created on a USB drive / SD card
+            // ("Failed to determine if … is child of …"). With All files access, write the file directly.
+            val direct = try {
+                copyDirect(job, parentId, buf, onBytes)
+            } catch (e2: Exception) {
+                if (e2 is CancellationException) throw e2
+                throw IOException("${e.message} — direct write also failed: ${e2.message}")
+            }
+            if (direct) return
+            throw e
+        }
 
         var ok = false
         try {
@@ -693,6 +722,43 @@ class CopyEngine(
             datesNotKept.incrementAndGet()
             log("  ⚠ Could not set the date of ${label(job.target, job.src.rel)}", Level.WARN)
         }
+    }
+
+    /**
+     * Fallback: copy to the real path of the destination folder (needs All files access).
+     * Returns false when that isn't possible, so the original error is reported.
+     */
+    private suspend fun copyDirect(job: CopyJob, parentId: String, buf: ByteArray, onBytes: (Int) -> Unit): Boolean {
+        if (!hasAllFilesAccess) return false
+        val dir = FileDates.fileFor(Saf.docUri(job.target.destTree, parentId)) ?: return false
+        if (!dir.isDirectory && !dir.mkdirs()) throw IOException("cannot create folder ${dir.path}")
+        val outFile = File(dir, job.src.name)
+        var ok = false
+        try {
+            val ctx = currentCoroutineContext()
+            cr.openInputStream(job.srcUri).use { input ->
+                if (input == null) throw IOException("cannot open source")
+                FileOutputStream(outFile).use { output ->
+                    while (true) {
+                        ctx.ensureActive()
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        output.write(buf, 0, n)
+                        onBytes(n)
+                    }
+                }
+            }
+            ok = true
+        } finally {
+            if (!ok) runCatching { outFile.delete() }
+        }
+        if (canSetDates && job.src.mtime > 0 && !outFile.setLastModified(job.src.mtime)) {
+            datesNotKept.incrementAndGet()
+        }
+        if (directWrites.getAndIncrement() == 0) {
+            log("  ℹ The storage service couldn't create files here — writing directly to ${dir.path}", Level.INFO)
+        }
+        return true
     }
 
     // ------------------------------------------------------------------ helpers

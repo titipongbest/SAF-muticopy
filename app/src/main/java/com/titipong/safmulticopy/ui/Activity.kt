@@ -278,11 +278,13 @@ private fun FilterChipSmall(label: String, selected: Boolean, onClick: () -> Uni
 private fun EventRow(e: FileEvent) {
     val cs = MaterialTheme.colorScheme
     val s = styleOf(e.kind)
+    var expanded by remember { mutableStateOf(false) }
     Row(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(s.color.copy(alpha = 0.06f))
+            .clickable { expanded = !expanded }
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -299,7 +301,7 @@ private fun EventRow(e: FileEvent) {
                 e.name,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
-                maxLines = 1,
+                maxLines = if (expanded) 3 else 1,
                 overflow = TextOverflow.Ellipsis,
             )
             val sub = buildString {
@@ -309,12 +311,13 @@ private fun EventRow(e: FileEvent) {
                 val folder = e.path.substringBeforeLast('/', "")
                 if (e.detail == null && folder.isNotEmpty()) append(" · $folder")
                 e.group?.let { append(" · $it") }
+                if (expanded && e.detail != null) append("\n${e.path}")
             }
             Text(
                 sub,
                 style = MaterialTheme.typography.labelSmall,
                 color = if (e.kind == EventKind.FAILED) s.color else cs.onSurfaceVariant,
-                maxLines = 2,
+                maxLines = if (expanded) Int.MAX_VALUE else 2,
                 overflow = TextOverflow.Ellipsis,
             )
         }
