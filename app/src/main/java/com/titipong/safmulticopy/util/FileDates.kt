@@ -40,10 +40,10 @@ object FileDates {
         return if (rel.isEmpty()) root else File(root, rel)
     }
 
-    /** Sets the file's modified date. Returns false if it could not be set. */
-    fun set(docUri: Uri, mtime: Long): Boolean {
-        if (mtime <= 0) return false
-        val f = fileFor(docUri) ?: return false
-        return runCatching { f.exists() && f.setLastModified(mtime) }.getOrDefault(false)
+    /** Sets the file's modified date. Returns the file, or null if the date could not be set. */
+    fun set(docUri: Uri, mtime: Long): File? {
+        if (mtime <= 0) return null
+        val f = fileFor(docUri) ?: return null
+        return f.takeIf { runCatching { it.exists() && it.setLastModified(mtime) }.getOrDefault(false) }
     }
 }

@@ -1,6 +1,7 @@
 package com.titipong.safmulticopy.engine
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.DocumentsContract.Document
@@ -27,6 +28,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -91,6 +93,9 @@ class CopyEngine(
     /** Lets the app write by real path when SAF fails (some USB drives / SD cards). */
     private val hasAllFilesAccess = FileDates.hasAccess(context)
     private val directWrites = AtomicInteger()
+
+    /** Files the gallery / media index doesn't know about yet (written directly, or date changed). */
+    private val toScan = ConcurrentLinkedQueue<String>()
 
     private val workerCount = req.threads.coerceIn(1, 32)
     private val slots = Array(workerCount) { Slot() }
@@ -247,6 +252,7 @@ class CopyEngine(
             event(EventKind.FAILED, t.label, 0, error)
         } finally {
             clearSlots()
+            scanForGallery()
             aggFilesToCopy += filesToCopy
             aggBytesToCopy += bytesToCopy
             aggFilesDone += filesDone.get()
@@ -383,7 +389,7 @@ class CopyEngine(
                     datesFixed.incrementAndGet()
                     event(EventKind.WOULD_FIX_DATE, fx.label, fx.size)
                 }
-                FileDates.set(Saf.docUri(destTree, fx.docId), fx.mtime) -> {
+                FileDates.set(Saf.docUri(destTree, fx.docId), fx.mtime)?.also { toScan += it.path } != null -> {
                     datesFixed.incrementAndGet()
                     event(EventKind.DATE_FIXED, fx.label, fx.size)
                 }
@@ -718,9 +724,14 @@ class CopyEngine(
         }
 
         // Give the copy the original's date (after the stream is closed, or closing resets it).
-        if (canSetDates && job.src.mtime > 0 && !FileDates.set(out, job.src.mtime)) {
-            datesNotKept.incrementAndGet()
-            log("  ⚠ Could not set the date of ${label(job.target, job.src.rel)}", Level.WARN)
+        if (canSetDates && job.src.mtime > 0) {
+            val f = FileDates.set(out, job.src.mtime)
+            if (f != null) {
+                toScan += f.path // the gallery still has the copy's date — let it re-read the file
+            } else {
+                datesNotKept.incrementAndGet()
+                log("  ⚠ Could not set the date of ${label(job.target, job.src.rel)}", Level.WARN)
+            }
         }
     }
 
@@ -755,10 +766,24 @@ class CopyEngine(
         if (canSetDates && job.src.mtime > 0 && !outFile.setLastModified(job.src.mtime)) {
             datesNotKept.incrementAndGet()
         }
+        toScan += outFile.path // written without the storage service, so the gallery doesn't know it yet
         if (directWrites.getAndIncrement() == 0) {
             log("  ℹ The storage service couldn't create files here — writing directly to ${dir.path}", Level.INFO)
         }
         return true
+    }
+
+    /**
+     * Asks Android to (re)index files so the gallery shows new photos and their original dates.
+     * Runs in the background; done after each task, also when it was stopped.
+     */
+    private fun scanForGallery() {
+        val paths = generateSequence { toScan.poll() }.toList()
+        if (paths.isEmpty()) return
+        log("  Updating the gallery for ${formatCount(paths.size)} files", Level.INFO)
+        paths.chunked(SCAN_BATCH).forEach { batch ->
+            runCatching { MediaScannerConnection.scanFile(context, batch.toTypedArray(), null, null) }
+        }
     }
 
     // ------------------------------------------------------------------ helpers
@@ -895,6 +920,7 @@ class CopyEngine(
     companion object {
         private const val BUFFER_SIZE = 256 * 1024
         private const val MAX_EVENTS = 60
+        private const val SCAN_BATCH = 500
         private const val MTIME_TOLERANCE_MS = 2_000L // FAT stores time in 2-second steps
     }
 }
