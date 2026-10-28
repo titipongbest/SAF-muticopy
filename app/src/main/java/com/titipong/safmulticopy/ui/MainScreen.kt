@@ -80,12 +80,9 @@ import com.titipong.safmulticopy.MainViewModel
 import com.titipong.safmulticopy.PairDraft
 import com.titipong.safmulticopy.data.FolderPair
 import com.titipong.safmulticopy.engine.CopyState
-import com.titipong.safmulticopy.engine.Level
-import com.titipong.safmulticopy.engine.LogLine
 import com.titipong.safmulticopy.engine.Phase
 import com.titipong.safmulticopy.engine.TaskResult
 import com.titipong.safmulticopy.engine.TaskStatus
-import com.titipong.safmulticopy.ui.theme.LogBackground
 import com.titipong.safmulticopy.ui.theme.Success
 import com.titipong.safmulticopy.ui.theme.Warn
 import com.titipong.safmulticopy.util.formatCount
@@ -252,6 +249,19 @@ fun MainScreen(vm: MainViewModel) {
                     ProgressCard(st, onDismiss = vm::dismissResult)
                 }
             }
+            // One running bar per parallel copy (not for previews — nothing is copied).
+            if (st.phase == Phase.COPYING && !st.dryRun && st.slots.isNotEmpty()) {
+                item(key = "workers") { WorkersCard(st) }
+            }
+            if (st.events.isNotEmpty()) {
+                item(key = "recent") {
+                    RecentFilesCard(
+                        st = st,
+                        canShare = !running && st.logFile != null,
+                        onShare = { shareLog(context, st.logFile) },
+                    )
+                }
+            }
 
             if (vm.tab == TAB_PAIRS) {
                 pairItems(
@@ -285,16 +295,6 @@ fun MainScreen(vm: MainViewModel) {
             }
 
             item(key = "settings") { SettingsCard(vm, enabled = !running) }
-
-            if (st.log.isNotEmpty()) {
-                item(key = "log") {
-                    LogCard(
-                        lines = st.log,
-                        canShare = !running && st.logFile != null,
-                        onShare = { shareLog(context, st.logFile) },
-                    )
-                }
-            }
         }
     }
 
@@ -440,8 +440,8 @@ private fun SettingsCard(vm: MainViewModel, enabled: Boolean) {
             enabled = true,
         ) { vm.keepScreenOn = it; vm.save() }
         SwitchRow(
-            title = "Log unchanged files",
-            subtitle = "Also list files that were skipped",
+            title = "Log skipped files",
+            subtitle = "Also write skipped files to the full log file",
             checked = vm.showSkipped,
             enabled = enabled,
         ) { vm.showSkipped = it; vm.save() }
@@ -606,29 +606,9 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CountTile(if (st.dryRun) "To copy" else "Copied", st.copied, Success, Modifier.weight(1f))
-                CountTile("Unchanged", st.skipped, cs.onSurfaceVariant, Modifier.weight(1f))
+                CountTile("Skipped", st.skipped, cs.onSurfaceVariant, Modifier.weight(1f))
                 CountTile("Failed", st.failed, cs.error, Modifier.weight(1f))
                 CountTile(if (st.dryRun) "To delete" else "Deleted", st.deleted, Warn, Modifier.weight(1f))
-            }
-
-            if (st.running && st.current.isNotEmpty()) {
-                Spacer(Modifier.height(12.dp))
-                Text("Working on", style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
-                st.current.take(4).forEach {
-                    Text(
-                        "• $it",
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (st.current.size > 4) {
-                    Text(
-                        "+${st.current.size - 4} more",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = cs.onSurfaceVariant,
-                    )
-                }
             }
 
             if (st.finished && queue && st.results.isNotEmpty()) {
@@ -711,56 +691,7 @@ private fun ResultRow(r: TaskResult, dryRun: Boolean) {
     }
 }
 
-// ---------------------------------------------------------------- log + bottom bar
-
-@Composable
-private fun LogCard(lines: List<LogLine>, canShare: Boolean, onShare: () -> Unit) {
-    val cs = MaterialTheme.colorScheme
-    val scroll = rememberScrollState()
-    LaunchedEffect(lines.size, lines.lastOrNull()) { scroll.scrollTo(scroll.maxValue) }
-    SectionCard(
-        title = "Log",
-        subtitle = "Last ${lines.size} lines · full log can be shared",
-        trailing = {
-            if (canShare) {
-                TextButton(onClick = onShare) {
-                    Icon(Icons.Filled.Share, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Share")
-                }
-            }
-        },
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(max = 320.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(LogBackground)
-                .border(1.dp, cs.outlineVariant, RoundedCornerShape(12.dp))
-                .verticalScroll(scroll)
-                .padding(10.dp),
-        ) {
-            lines.forEach { l ->
-                Text(
-                    l.text,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 15.sp,
-                    fontWeight = if (l.level == Level.HEAD) FontWeight.Bold else FontWeight.Normal,
-                    color = when (l.level) {
-                        Level.HEAD -> cs.primary
-                        Level.INFO -> cs.onSurface
-                        Level.OK -> Success
-                        Level.WARN -> Warn
-                        Level.ERROR -> cs.error
-                        Level.DIM -> cs.onSurfaceVariant
-                    },
-                )
-            }
-        }
-    }
-}
+// ---------------------------------------------------------------- bottom bar
 
 @Composable
 private fun BottomActions(

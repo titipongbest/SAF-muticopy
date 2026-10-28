@@ -79,15 +79,61 @@ class CopyEngine(
     private val skipped = AtomicInteger()
     private val failed = AtomicInteger()
     private val deleted = AtomicInteger()
-    private val current = ConcurrentHashMap<Int, String>()
+    private val workerCount = req.threads.coerceIn(1, 32)
+    private val slots = Array(workerCount) { Slot() }
     private val results = CopyOnWriteArrayList<TaskResult>()
     private val startedAt = System.currentTimeMillis()
     @Volatile private var finishedAt = 0L
 
     private val logLock = Any()
-    private val logLines = ArrayDeque<LogLine>()
     private var logWriter: BufferedWriter? = null
     private var logFile: File? = null
+
+    private val eventLock = Any()
+    private val events = ArrayDeque<FileEvent>()
+    private var eventSeq = 0L
+
+    /** What one parallel worker is doing right now (drives one progress bar). */
+    private class Slot {
+        @Volatile var name: String? = null
+        @Volatile var size = 0L
+        val done = AtomicLong()
+        @Volatile var retry = 0
+        @Volatile var update = false
+
+        fun start(name: String, size: Long, update: Boolean) {
+            done.set(0)
+            retry = 0
+            this.size = size
+            this.update = update
+            this.name = name
+        }
+
+        fun clear() {
+            name = null
+            done.set(0)
+            retry = 0
+        }
+    }
+
+    private fun clearSlots() = slots.forEach { it.clear() }
+
+    private fun event(kind: EventKind, path: String, size: Long, detail: String? = null) {
+        synchronized(eventLock) {
+            events.addFirst(
+                FileEvent(
+                    id = eventSeq++,
+                    kind = kind,
+                    name = path.substringAfterLast('/'),
+                    path = path,
+                    size = size,
+                    group = if (req.tasks.size > 1) task.label else null,
+                    detail = detail,
+                ),
+            )
+            while (events.size > MAX_EVENTS) events.removeLast()
+        }
+    }
 
     private class Target(val destTree: Uri, val name: String, val dirIds: ConcurrentHashMap<String, String>)
 
@@ -129,7 +175,7 @@ class CopyEngine(
             log("✖ Error: ${describe(e)}", Level.ERROR)
         } finally {
             ticker.cancel()
-            current.clear()
+            clearSlots()
             message = ""
             finishedAt = System.currentTimeMillis()
             writeSummary()
@@ -175,8 +221,9 @@ class CopyEngine(
             status = TaskStatus.FAILED
             error = describe(e)
             log("✖ ${t.label}: $error", Level.ERROR)
+            event(EventKind.FAILED, t.label, 0, error)
         } finally {
-            current.clear()
+            clearSlots()
             aggFilesToCopy += filesToCopy
             aggBytesToCopy += bytesToCopy
             aggFilesDone += filesDone.get()
@@ -222,6 +269,7 @@ class CopyEngine(
             val existing = destChildren.firstOrNull { it.name.equals(name, ignoreCase = true) }
             if (existing != null && !existing.isDir) {
                 log("  ✖ Destination already has a FILE named \"$name\" — source skipped", Level.ERROR)
+                event(EventKind.FAILED, name, 0, "a file with this name is in the destination")
                 failed.addAndGet(src.files.size)
                 continue
             }
@@ -289,7 +337,7 @@ class CopyEngine(
         all.forEach { queue.trySend(it) }
         queue.close()
         coroutineScope {
-            repeat(req.threads.coerceIn(1, 32)) { worker ->
+            repeat(workerCount) { worker ->
                 launch(Dispatchers.IO) {
                     val buf = ByteArray(BUFFER_SIZE)
                     for (job in queue) process(worker, job, buf)
@@ -330,12 +378,14 @@ class CopyEngine(
             val parent = Saf.parentKey(k)
             if (k in blocked || parent in blocked || Saf.underAny(k, blocked)) {
                 failed.incrementAndGet()
+                event(EventKind.FAILED, label(target, f.rel), f.size, "a file in the destination has its folder's name")
                 continue
             }
             if (dest.dirs.containsKey(k)) {
                 if (!mirror) {
                     log("  ✖ Mismatch: \"${f.rel}\" is a file in source but a folder in destination", Level.ERROR)
                     failed.incrementAndGet()
+                    event(EventKind.FAILED, label(target, f.rel), f.size, "a folder with this name is in the destination")
                 } else {
                     // the folder is removed by mirror first
                     jobs += CopyJob(Saf.docUri(srcTree, f.docId), f, target, parent, null)
@@ -349,6 +399,7 @@ class CopyEngine(
                     jobs += CopyJob(Saf.docUri(srcTree, f.docId), f, target, parent, d.docId)
                 else -> {
                     skipped.incrementAndGet()
+                    event(EventKind.SKIPPED, label(target, f.rel), f.size)
                     if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
                 }
             }
@@ -390,17 +441,20 @@ class CopyEngine(
             if (info == null) {
                 failed.incrementAndGet()
                 log("  ✖ Cannot read a selected file (it may have been moved or deleted)", Level.ERROR)
+                event(EventKind.FAILED, uri.lastPathSegment ?: "file", 0, "can't read — moved or deleted?")
                 continue
             }
             val key = info.name.lowercase()
             if (!seen.add(key)) {
                 failed.incrementAndGet()
                 log("  ✖ Two selected files are both named \"${info.name}\" — only the first is copied", Level.ERROR)
+                event(EventKind.FAILED, info.name, info.size, "another selected file has the same name")
                 continue
             }
             if (key in takenByFolders) {
                 failed.incrementAndGet()
                 log("  ✖ \"${info.name}\": a folder with this name exists in the destination", Level.ERROR)
+                event(EventKind.FAILED, info.name, info.size, "a folder with this name is in the destination")
                 continue
             }
             val f = FileRec(info.name, info.name, "", info.size, info.mtime)
@@ -411,6 +465,7 @@ class CopyEngine(
                     jobs += CopyJob(uri, f, target, "", d.docId)
                 else -> {
                     skipped.incrementAndGet()
+                    event(EventKind.SKIPPED, f.rel, f.size)
                     if (req.showSkipped) log("  = Same: ${f.rel}", Level.DIM)
                 }
             }
@@ -448,15 +503,18 @@ class CopyEngine(
             if (req.dryRun) {
                 deleted.incrementAndGet()
                 log("  − Would delete: $label", Level.WARN)
+                event(EventKind.WOULD_DELETE, label, 0)
                 continue
             }
             try {
                 DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, id))
                 deleted.incrementAndGet()
                 log("  − Deleted: $label", Level.WARN)
+                event(EventKind.DELETED, label, 0)
             } catch (e: Exception) {
                 failed.incrementAndGet()
                 log("  ✖ Cannot delete $label — ${e.message}", Level.ERROR)
+                event(EventKind.FAILED, label, 0, "can't delete — ${e.message ?: e.javaClass.simpleName}")
             }
         }
     }
@@ -495,27 +553,31 @@ class CopyEngine(
     private suspend fun process(worker: Int, job: CopyJob, buf: ByteArray) {
         val label = label(job.target, job.src.rel)
         val size = job.src.size
-        current[worker] = job.src.rel
+        val update = job.existingDocId != null
+        val slot = slots[worker]
+        slot.start(label, size, update)
         try {
             if (req.dryRun) {
                 copied.incrementAndGet()
                 bytesDone.addAndGet(size)
                 filesDone.incrementAndGet()
-                val verb = if (job.existingDocId != null) "Would update" else "Would copy"
-                log("  + $verb: $label (${formatSize(size)})", Level.OK)
+                log("  + ${if (update) "Would update" else "Would copy"}: $label (${formatSize(size)})", Level.OK)
+                event(if (update) EventKind.WOULD_UPDATE else EventKind.WOULD_COPY, label, size)
                 return
             }
-            val update = job.existingDocId != null
             var attempt = 0
             while (true) {
                 var written = 0L
+                slot.done.set(0)
                 try {
                     copyOne(job, buf) { n ->
                         written += n
                         bytesDone.addAndGet(n.toLong())
+                        slot.done.addAndGet(n.toLong())
                     }
                     copied.incrementAndGet()
                     log("  + ${if (update) "Updated" else "Copied"}: $label (${formatSize(size)})", Level.OK)
+                    event(if (update) EventKind.UPDATED else EventKind.COPIED, label, size)
                     break
                 } catch (e: CancellationException) {
                     throw e
@@ -527,15 +589,17 @@ class CopyEngine(
                         failed.incrementAndGet()
                         bytesDone.addAndGet(size)
                         log("  ✖ Failed: $label — $reason", Level.ERROR)
+                        event(EventKind.FAILED, label, size, reason)
                         break
                     }
+                    slot.retry = attempt
                     log("  ↻ Retry $attempt/${req.retries}: $label — $reason", Level.WARN)
                     delay(1000L * attempt)
                 }
             }
             filesDone.incrementAndGet()
         } finally {
-            current.remove(worker)
+            slot.clear()
         }
     }
 
@@ -595,7 +659,7 @@ class CopyEngine(
     }
 
     private fun publishNow() {
-        val lines = synchronized(logLock) { logLines.toList() }
+        val recent = synchronized(eventLock) { events.toList() }
         val done = finishedAt > 0
         val t = task
         publish(
@@ -612,7 +676,9 @@ class CopyEngine(
                 skipped = skipped.get(),
                 failed = failed.get(),
                 deleted = deleted.get(),
-                current = current.values.toList(),
+                slots = if (done) emptyList() else slots.mapIndexed { i, s ->
+                    SlotState(i, s.name, s.size, s.done.get(), s.retry, s.update)
+                },
                 startedAt = startedAt,
                 copyStartedAt = if (done) startedAt else copyStartedAt,
                 finishedAt = finishedAt,
@@ -622,16 +688,16 @@ class CopyEngine(
                 taskId = t.id,
                 pendingIds = if (done) emptyList() else req.tasks.drop(taskIndex + 1).mapNotNull { it.id },
                 results = results.toList(),
-                log = lines,
+                events = recent,
                 logFile = logFile?.absolutePath,
             ),
         )
     }
 
+    /** Writes a line to the log file (shown in the app as "Share full log"). */
+    @Suppress("UNUSED_PARAMETER")
     private fun log(text: String, level: Level = Level.INFO) {
         synchronized(logLock) {
-            logLines.addLast(LogLine(text, level))
-            while (logLines.size > MAX_LOG_LINES) logLines.removeFirst()
             runCatching {
                 logWriter?.write(text)
                 logWriter?.newLine()
@@ -704,7 +770,7 @@ class CopyEngine(
 
     companion object {
         private const val BUFFER_SIZE = 256 * 1024
-        private const val MAX_LOG_LINES = 400
+        private const val MAX_EVENTS = 60
         private const val MTIME_TOLERANCE_MS = 2_000L // FAT stores time in 2-second steps
     }
 }

@@ -8,7 +8,31 @@ enum class Level { HEAD, INFO, OK, WARN, ERROR, DIM }
 
 enum class TaskStatus { OK, ERRORS, FAILED, CANCELLED }
 
-data class LogLine(val text: String, val level: Level)
+/** One progress bar = one parallel copy worker. [name] is null while the worker is idle. */
+data class SlotState(
+    val index: Int,
+    val name: String?,
+    val size: Long,
+    val done: Long,
+    val retry: Int,
+    val update: Boolean,
+) {
+    val fraction: Float
+        get() = if (size > 0) (done.toFloat() / size).coerceIn(0f, 1f) else 0f
+}
+
+enum class EventKind { COPIED, UPDATED, SKIPPED, FAILED, DELETED, WOULD_COPY, WOULD_UPDATE, WOULD_DELETE }
+
+/** A finished file shown in the "Recent files" list. */
+data class FileEvent(
+    val id: Long,
+    val kind: EventKind,
+    val name: String,
+    val path: String,
+    val size: Long,
+    val group: String?,
+    val detail: String? = null,
+)
 
 /**
  * One unit of work in the queue.
@@ -66,7 +90,7 @@ data class CopyState(
     val skipped: Int = 0,
     val failed: Int = 0,
     val deleted: Int = 0,
-    val current: List<String> = emptyList(),
+    val slots: List<SlotState> = emptyList(),
     val startedAt: Long = 0,
     val copyStartedAt: Long = 0,
     val finishedAt: Long = 0,
@@ -77,7 +101,8 @@ data class CopyState(
     val taskId: String? = null,
     val pendingIds: List<String> = emptyList(),
     val results: List<TaskResult> = emptyList(),
-    val log: List<LogLine> = emptyList(),
+    /** Newest first. */
+    val events: List<FileEvent> = emptyList(),
     val logFile: String? = null,
 ) {
     val running: Boolean
