@@ -332,7 +332,7 @@ fun MainScreen(vm: MainViewModel) {
             text = {
                 Text(
                     (if (c.names.size == 1 && c.names[0] == "Quick copy") "" else
-                        "Mirror is on for: " + c.names.joinToString { "\"$it\"" } + "\n\n") +
+                        "Mirror mode is set for: " + c.names.joinToString { "\"$it\"" } + "\n\n") +
                         "Files and folders in the destination that are not in the source will be permanently deleted.\n\n" +
                         "Tip: tap Preview first to see exactly what would be deleted.",
                 )

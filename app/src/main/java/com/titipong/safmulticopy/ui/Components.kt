@@ -2,7 +2,9 @@ package com.titipong.safmulticopy.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -14,6 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,6 +30,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -40,6 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.titipong.safmulticopy.FolderRef
+import com.titipong.safmulticopy.ui.theme.Success
 import com.titipong.safmulticopy.util.formatCount
 import com.titipong.safmulticopy.util.formatSize
 
@@ -169,6 +176,94 @@ internal fun PickRow(ref: FolderRef?, emoji: String, chooseLabel: String, onPick
         }
         Spacer(Modifier.width(8.dp))
         Text("Change", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+/**
+ * Merge or Mirror, each explained on screen so the user doesn't have to remember the difference.
+ * [mirror] = false means Merge.
+ */
+@Composable
+internal fun CopyModeSelector(mirror: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Column {
+        Text("Copy mode", style = MaterialTheme.typography.bodyLarge)
+        Spacer(Modifier.height(8.dp))
+        Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            ModeOption(
+                selected = !mirror,
+                enabled = enabled,
+                emoji = "➕",
+                title = "Merge",
+                tag = "Safe · good for backups",
+                tagColor = Success,
+                lines = listOf(
+                    "Copies new and changed files.",
+                    "Never deletes anything in the destination.",
+                ),
+                onClick = { onChange(false) },
+            )
+            ModeOption(
+                selected = mirror,
+                enabled = enabled,
+                emoji = "🪞",
+                title = "Mirror",
+                tag = "Deletes files",
+                tagColor = MaterialTheme.colorScheme.error,
+                lines = listOf(
+                    "Makes the destination exactly like the source.",
+                    "Files that aren't in the source are deleted from the destination — " +
+                        "including files you delete from the source later.",
+                ),
+                onClick = { onChange(true) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModeOption(
+    selected: Boolean,
+    enabled: Boolean,
+    emoji: String,
+    title: String,
+    tag: String,
+    tagColor: Color,
+    lines: List<String>,
+    onClick: () -> Unit,
+) {
+    val cs = MaterialTheme.colorScheme
+    val accent = if (title == "Mirror") cs.error else cs.primary
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .border(
+                if (selected) 2.dp else 1.dp,
+                if (selected) accent else cs.outlineVariant,
+                RoundedCornerShape(14.dp),
+            )
+            .background(if (selected) accent.copy(alpha = 0.06f) else cs.surface)
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+            .padding(start = 4.dp, end = 12.dp, top = 6.dp, bottom = 12.dp),
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = null,
+            enabled = enabled,
+            colors = RadioButtonDefaults.colors(selectedColor = accent),
+            modifier = Modifier.padding(12.dp),
+        )
+        Column(Modifier.weight(1f).padding(top = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("$emoji  $title", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(8.dp))
+                Badge(tag, tagColor)
+            }
+            Spacer(Modifier.height(4.dp))
+            lines.forEach {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+        }
     }
 }
 

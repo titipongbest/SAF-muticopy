@@ -200,10 +200,9 @@ private fun PairCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    if (pair.mirror) {
-                        Spacer(Modifier.width(6.dp))
-                        Badge("MIRROR", cs.error)
-                    }
+                    Spacer(Modifier.width(6.dp))
+                    // Always show the mode so it's clear what Sync will do.
+                    if (pair.mirror) Badge("🪞 MIRROR", cs.error) else Badge("➕ MERGE", cs.primary)
                 }
                 Spacer(Modifier.height(8.dp))
                 Endpoint("📁", pair.sourceName, pair.sourceLocation)
@@ -360,14 +359,8 @@ internal fun PairEditorSheet(
             }
 
             HorizontalDivider(color = cs.outlineVariant)
-            SwitchRow(
-                title = "Mirror",
-                subtitle = if (draft.mirror) "Deletes files in the destination that aren't in the source"
-                else "Off — extra files in the destination are kept",
-                checked = draft.mirror,
-                enabled = true,
-                danger = true,
-            ) { onChange(draft.copy(mirror = it)) }
+            CopyModeSelector(mirror = draft.mirror, enabled = true) { onChange(draft.copy(mirror = it)) }
+            HorizontalDivider(color = cs.outlineVariant)
             ExcludeFields(
                 files = draft.excludeFiles,
                 dirs = draft.excludeDirs,

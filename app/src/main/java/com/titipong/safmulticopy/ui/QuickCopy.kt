@@ -141,18 +141,11 @@ internal fun DestinationCard(dest: FolderRef?, enabled: Boolean, onPick: () -> U
     }
 }
 
-/** Mirror + excludes for quick copy (folder pairs have their own). */
+/** Copy mode + excludes for quick copy (folder pairs have their own). */
 @Composable
 internal fun QuickOptionsCard(vm: MainViewModel, enabled: Boolean) {
     SectionCard(title = "Quick copy options") {
-        SwitchRow(
-            title = "Mirror",
-            subtitle = if (vm.mirror) "Deletes files in the destination that aren't in the source"
-            else "Off — extra files in the destination are kept",
-            checked = vm.mirror,
-            enabled = enabled,
-            danger = true,
-        ) { vm.mirror = it; vm.save() }
+        CopyModeSelector(mirror = vm.mirror, enabled = enabled) { vm.mirror = it; vm.save() }
 
         HorizontalDivider(Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
         ExcludeFields(
