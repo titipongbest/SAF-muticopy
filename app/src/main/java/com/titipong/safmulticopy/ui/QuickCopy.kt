@@ -1,5 +1,11 @@
 package com.titipong.safmulticopy.ui
 
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.clickable
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -166,34 +172,65 @@ internal fun ExcludeFields(
     onFiles: (String) -> Unit,
     onDirs: (String) -> Unit,
 ) {
+    // Hidden until tapped — most people never need it.
+    var open by remember { mutableStateOf(false) }
+    val cs = MaterialTheme.colorScheme
+    val summary = listOf(files, dirs).filter { it.isNotBlank() }.joinToString("; ")
     Column {
-        Text("Exclude", style = MaterialTheme.typography.bodyLarge)
-        Text(
-            "Separate with ;  — * and ? wildcards",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = files,
-            onValueChange = onFiles,
-            label = { Text("Files") },
-            placeholder = { Text("*.tmp; Thumbs.db") },
-            singleLine = true,
-            enabled = enabled,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = dirs,
-            onValueChange = onDirs,
-            label = { Text("Folders") },
-            placeholder = { Text(".thumbnails; .trash*") },
-            singleLine = true,
-            enabled = enabled,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .clickable { open = !open }
+                .padding(vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Exclude files or folders", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    if (summary.isEmpty()) "Optional — tap to set" else summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (summary.isEmpty()) cs.onSurfaceVariant else cs.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
+                contentDescription = if (open) "Hide" else "Show",
+                tint = cs.onSurfaceVariant,
+            )
+        }
+        AnimatedVisibility(visible = open) {
+            Column {
+                Text(
+                    "Separate with ;  — * and ? wildcards",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = files,
+                    onValueChange = onFiles,
+                    label = { Text("Files") },
+                    placeholder = { Text("*.tmp; Thumbs.db") },
+                    singleLine = true,
+                    enabled = enabled,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = dirs,
+                    onValueChange = onDirs,
+                    label = { Text("Folders") },
+                    placeholder = { Text(".thumbnails; .trash*") },
+                    singleLine = true,
+                    enabled = enabled,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
     }
 }

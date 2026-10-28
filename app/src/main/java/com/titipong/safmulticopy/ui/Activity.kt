@@ -1,10 +1,13 @@
 package com.titipong.safmulticopy.ui
 
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -220,7 +224,7 @@ private fun matches(f: Filter, kind: EventKind): Boolean = when (f) {
 @Composable
 internal fun RecentFilesCard(st: CopyState, canShare: Boolean, onShare: () -> Unit) {
     var filter by remember { mutableStateOf(Filter.ALL) }
-    val shown = st.events.filter { matches(filter, it.kind) }.take(30)
+    val shown = st.events.filter { matches(filter, it.kind) }
 
     SectionCard(
         title = "Recent files",
@@ -241,7 +245,19 @@ internal fun RecentFilesCard(st: CopyState, canShare: Boolean, onShare: () -> Un
             }
         }
         Spacer(Modifier.height(10.dp))
-        Column(Modifier.animateContentSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Fixed-height box that scrolls inside, so the list never takes over the screen.
+        val scroll = rememberScrollState()
+        LaunchedEffect(filter) { scroll.scrollTo(0) }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 260.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
+                .verticalScroll(scroll)
+                .padding(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             if (shown.isEmpty()) {
                 Text(
                     "Nothing here yet",

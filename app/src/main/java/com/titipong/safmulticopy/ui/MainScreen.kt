@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -277,26 +278,30 @@ fun MainScreen(vm: MainViewModel) {
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (st.phase != Phase.IDLE) {
-                item(key = "progress") {
-                    ProgressCard(st, onDismiss = vm::dismissResult)
+            // Progress, running bars and recent files.
+            val statusItems: LazyListScope.() -> Unit = {
+                if (st.phase != Phase.IDLE) {
+                    item(key = "progress") {
+                        ProgressCard(st, onDismiss = vm::dismissResult)
+                    }
                 }
-            }
-            // One running bar per parallel copy (not for previews — nothing is copied).
-            if (st.phase == Phase.COPYING && !st.dryRun && st.slots.isNotEmpty()) {
-                item(key = "workers") { WorkersCard(st) }
-            }
-            if (st.events.isNotEmpty()) {
-                item(key = "recent") {
-                    RecentFilesCard(
-                        st = st,
-                        canShare = !running && st.logFile != null,
-                        onShare = { shareLog(context, st.logFile) },
-                    )
+                // One running bar per parallel copy (not for previews — nothing is copied).
+                if (st.phase == Phase.COPYING && !st.dryRun && st.slots.isNotEmpty()) {
+                    item(key = "workers") { WorkersCard(st) }
+                }
+                if (st.events.isNotEmpty()) {
+                    item(key = "recent") {
+                        RecentFilesCard(
+                            st = st,
+                            canShare = !running && st.logFile != null,
+                            onShare = { shareLog(context, st.logFile) },
+                        )
+                    }
                 }
             }
 
             if (vm.tab == TAB_PAIRS) {
+                statusItems()
                 pairItems(
                     pairs = pairs,
                     st = st,
@@ -309,6 +314,7 @@ fun MainScreen(vm: MainViewModel) {
                     onNew = { editing = PairDraft() },
                 )
             } else {
+                // Quick copy: what and where come first.
                 item(key = "sources") {
                     SourcesCard(
                         folders = vm.sources,
@@ -324,6 +330,7 @@ fun MainScreen(vm: MainViewModel) {
                 item(key = "dest") {
                     DestinationCard(vm.destination, enabled = !running, onPick = { pickDest.launch(null) })
                 }
+                statusItems()
                 item(key = "quick-options") { QuickOptionsCard(vm, enabled = !running) }
             }
 
