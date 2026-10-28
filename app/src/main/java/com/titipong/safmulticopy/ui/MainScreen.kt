@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.titipong.safmulticopy.ui
 
 import android.Manifest
@@ -10,10 +12,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,13 +29,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -42,19 +42,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -69,38 +64,47 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.titipong.safmulticopy.FolderRef
 import com.titipong.safmulticopy.MainViewModel
+import com.titipong.safmulticopy.PairDraft
+import com.titipong.safmulticopy.data.FolderPair
 import com.titipong.safmulticopy.engine.CopyState
 import com.titipong.safmulticopy.engine.Level
 import com.titipong.safmulticopy.engine.LogLine
 import com.titipong.safmulticopy.engine.Phase
+import com.titipong.safmulticopy.engine.TaskResult
+import com.titipong.safmulticopy.engine.TaskStatus
 import com.titipong.safmulticopy.ui.theme.LogBackground
 import com.titipong.safmulticopy.ui.theme.Success
 import com.titipong.safmulticopy.ui.theme.Warn
 import com.titipong.safmulticopy.util.formatCount
 import com.titipong.safmulticopy.util.formatDuration
 import com.titipong.safmulticopy.util.formatSize
+import com.titipong.safmulticopy.util.resultSummary
 import java.io.File
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
+private const val TAB_PAIRS = 0
+private const val TAB_QUICK = 1
+
+/** A pending "mirror will delete files" confirmation. */
+private class MirrorConfirm(val names: List<String>, val action: () -> Unit)
+
 @Composable
 fun MainScreen(vm: MainViewModel) {
     val st by vm.state.collectAsStateWithLifecycle()
+    val pairs by vm.pairs.collectAsStateWithLifecycle()
     val running = st.running
     val context = LocalContext.current
 
@@ -114,6 +118,7 @@ fun MainScreen(vm: MainViewModel) {
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
+        vm.refreshGrants()
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -123,8 +128,10 @@ fun MainScreen(vm: MainViewModel) {
     }
 
     var errorText by remember { mutableStateOf<String?>(null) }
-    var confirmMirror by remember { mutableStateOf(false) }
+    var confirm by remember { mutableStateOf<MirrorConfirm?>(null) }
+    var editing by remember { mutableStateOf<PairDraft?>(null) }
 
+    // Quick copy pickers
     val pickSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) vm.addSource(uri)?.let { errorText = it }
     }
@@ -134,43 +141,100 @@ fun MainScreen(vm: MainViewModel) {
     val pickDest = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) vm.setDestinationUri(uri)?.let { errorText = it }
     }
+    // Pair editor pickers
+    val pickPairSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            val ref = vm.pickPairFolder(uri)
+            if (ref == null) errorText = "Could not get permission for this folder."
+            else editing = editing?.copy(source = ref)
+        }
+    }
+    val pickPairDest = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            val ref = vm.pickPairFolder(uri)
+            if (ref == null) errorText = "Could not get permission for this folder."
+            else editing = editing?.copy(destination = ref)
+        }
+    }
 
-    fun tryStart(dryRun: Boolean) {
+    fun startQuick(dryRun: Boolean) {
         val err = vm.validate()
         when {
             err != null -> errorText = err
-            !dryRun && vm.mirror -> confirmMirror = true
+            !dryRun && vm.mirror -> confirm = MirrorConfirm(listOf("Quick copy")) { vm.start(false) }
             else -> vm.start(dryRun)
         }
     }
 
+    fun startPairs(list: List<FolderPair>, dryRun: Boolean) {
+        val err = vm.validatePairs(list)
+        val mirrored = list.filter { it.mirror }
+        when {
+            err != null -> errorText = err
+            !dryRun && mirrored.isNotEmpty() ->
+                confirm = MirrorConfirm(mirrored.map { it.name }) { vm.syncPairs(list, false) }
+            else -> vm.syncPairs(list, dryRun)
+        }
+    }
+
+    val selectedPairs = pairs.filter { it.selected }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("SAF MultiCopy", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "Fast parallel folder copy",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    scrolledContainerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
+            Column(Modifier.background(MaterialTheme.colorScheme.background)) {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text("SAF MultiCopy", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Fast parallel folder copy & sync",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        scrolledContainerColor = MaterialTheme.colorScheme.background,
+                    ),
+                )
+                TabSwitcher(
+                    selected = vm.tab,
+                    labels = listOf(
+                        if (pairs.isEmpty()) "Folder pairs" else "Folder pairs (${pairs.size})",
+                        "Quick copy",
+                    ),
+                    onSelect = vm::selectTab,
+                )
+            }
         },
         bottomBar = {
-            BottomActions(
-                running = running,
-                onPreview = { tryStart(true) },
-                onStart = { tryStart(false) },
-                onStop = vm::stop,
-            )
+            if (running) {
+                BottomActions(running = true, primaryLabel = "", primaryEnabled = false, onPreview = {}, onPrimary = {}, onStop = vm::stop)
+            } else if (vm.tab == TAB_PAIRS) {
+                if (pairs.isNotEmpty()) {
+                    BottomActions(
+                        running = false,
+                        primaryLabel = if (selectedPairs.size == pairs.size && pairs.size > 1) "Sync all (${pairs.size})"
+                        else "Sync selected (${selectedPairs.size})",
+                        primaryEnabled = selectedPairs.isNotEmpty(),
+                        primaryIsSync = true,
+                        onPreview = { startPairs(selectedPairs, true) },
+                        onPrimary = { startPairs(selectedPairs, false) },
+                        onStop = vm::stop,
+                    )
+                }
+            } else {
+                BottomActions(
+                    running = false,
+                    primaryLabel = "Start copy",
+                    primaryEnabled = true,
+                    onPreview = { startQuick(true) },
+                    onPrimary = { startQuick(false) },
+                    onStop = vm::stop,
+                )
+            }
         },
     ) { pad ->
         LazyColumn(
@@ -178,7 +242,7 @@ fun MainScreen(vm: MainViewModel) {
             contentPadding = PaddingValues(
                 start = 16.dp,
                 end = 16.dp,
-                top = pad.calculateTopPadding() + 4.dp,
+                top = pad.calculateTopPadding() + 8.dp,
                 bottom = pad.calculateBottomPadding() + 16.dp,
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -188,22 +252,40 @@ fun MainScreen(vm: MainViewModel) {
                     ProgressCard(st, onDismiss = vm::dismissResult)
                 }
             }
-            item(key = "sources") {
-                SourcesCard(
-                    folders = vm.sources,
-                    files = vm.files,
+
+            if (vm.tab == TAB_PAIRS) {
+                pairItems(
+                    pairs = pairs,
+                    st = st,
+                    canAccess = vm::canAccess,
                     enabled = !running,
-                    onAddFolder = { pickSource.launch(null) },
-                    onAddFiles = { pickFiles.launch(arrayOf("*/*")) },
-                    onRemoveFolder = vm::removeSource,
-                    onRemoveFile = vm::removeFile,
-                    onClearFiles = vm::clearFiles,
+                    onToggle = { p, sel -> vm.setPairSelected(p.id, sel) },
+                    onSelectAll = vm::setAllPairsSelected,
+                    onEdit = { editing = vm.draftOf(it) },
+                    onSyncOne = { startPairs(listOf(it), false) },
+                    onNew = { editing = PairDraft() },
                 )
+            } else {
+                item(key = "sources") {
+                    SourcesCard(
+                        folders = vm.sources,
+                        files = vm.files,
+                        enabled = !running,
+                        onAddFolder = { pickSource.launch(null) },
+                        onAddFiles = { pickFiles.launch(arrayOf("*/*")) },
+                        onRemoveFolder = vm::removeSource,
+                        onRemoveFile = vm::removeFile,
+                        onClearFiles = vm::clearFiles,
+                    )
+                }
+                item(key = "dest") {
+                    DestinationCard(vm.destination, enabled = !running, onPick = { pickDest.launch(null) })
+                }
+                item(key = "quick-options") { QuickOptionsCard(vm, enabled = !running) }
             }
-            item(key = "dest") {
-                DestinationCard(vm.destination, enabled = !running, onPick = { pickDest.launch(null) })
-            }
-            item(key = "options") { OptionsCard(vm, enabled = !running) }
+
+            item(key = "settings") { SettingsCard(vm, enabled = !running) }
+
             if (st.log.isNotEmpty()) {
                 item(key = "log") {
                     LogCard(
@@ -216,27 +298,55 @@ fun MainScreen(vm: MainViewModel) {
         }
     }
 
-    if (confirmMirror) {
+    editing?.let { draft ->
+        val index = draft.id?.let { id -> pairs.indexOfFirst { it.id == id } } ?: -1
+        PairEditorSheet(
+            draft = draft,
+            onChange = { editing = it },
+            onPickSource = { pickPairSource.launch(draft.source?.uri) },
+            onPickDest = { pickPairDest.launch(draft.destination?.uri) },
+            onSave = {
+                val err = vm.savePair(draft)
+                if (err != null) errorText = err else editing = null
+            },
+            onDelete = draft.id?.let { id ->
+                {
+                    vm.deletePair(id)
+                    editing = null
+                }
+            },
+            onMoveUp = if (index > 0) ({ vm.movePair(draft.id!!, -1) }) else null,
+            onMoveDown = if (index >= 0 && index < pairs.size - 1) ({ vm.movePair(draft.id!!, 1) }) else null,
+            onDismiss = {
+                vm.discardDraft()
+                editing = null
+            },
+        )
+    }
+
+    confirm?.let { c ->
         AlertDialog(
-            onDismissRequest = { confirmMirror = false },
+            onDismissRequest = { confirm = null },
             icon = { Icon(Icons.Filled.Warning, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Mirror will delete files") },
             text = {
                 Text(
-                    "Files and folders in the destination that are not in the source will be permanently deleted.\n\n" +
+                    (if (c.names.size == 1 && c.names[0] == "Quick copy") "" else
+                        "Mirror is on for: " + c.names.joinToString { "\"$it\"" } + "\n\n") +
+                        "Files and folders in the destination that are not in the source will be permanently deleted.\n\n" +
                         "Tip: tap Preview first to see exactly what would be deleted.",
                 )
             },
             confirmButton = {
                 Button(
                     onClick = {
-                        confirmMirror = false
-                        vm.start(false)
+                        confirm = null
+                        c.action()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
                 ) { Text("Delete & copy") }
             },
-            dismissButton = { TextButton(onClick = { confirmMirror = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
         )
     }
 
@@ -250,195 +360,48 @@ fun MainScreen(vm: MainViewModel) {
     }
 }
 
-// ---------------------------------------------------------------- building blocks
+// ---------------------------------------------------------------- tabs + settings
 
 @Composable
-private fun SectionCard(
-    title: String,
-    subtitle: String? = null,
-    trailing: (@Composable () -> Unit)? = null,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    if (subtitle != null) {
-                        Text(
-                            subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-                trailing?.invoke()
-            }
-            Spacer(Modifier.height(12.dp))
-            content()
-        }
-    }
-}
-
-@Composable
-private fun FolderRow(ref: FolderRef, emoji: String, onRemove: (() -> Unit)?) {
+private fun TabSwitcher(selected: Int, labels: List<String>, onSelect: (Int) -> Unit) {
+    val cs = MaterialTheme.colorScheme
     Row(
-        modifier = Modifier
+        Modifier
             .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 8.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(start = 12.dp, top = 10.dp, bottom = 10.dp, end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .background(cs.surfaceContainerHighest)
+            .padding(4.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer),
-            contentAlignment = Alignment.Center,
-        ) { Text(emoji, fontSize = 18.sp) }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                ref.name,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                if (ref.isFile) "${formatSize(ref.size)} · ${ref.location}" else ref.location,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (onRemove != null) {
-            IconButton(onClick = onRemove) {
-                Icon(Icons.Filled.Close, "Remove", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            Spacer(Modifier.width(8.dp))
-        }
-    }
-}
-
-@Composable
-private fun SourcesCard(
-    folders: List<FolderRef>,
-    files: List<FolderRef>,
-    enabled: Boolean,
-    onAddFolder: () -> Unit,
-    onAddFiles: () -> Unit,
-    onRemoveFolder: (FolderRef) -> Unit,
-    onRemoveFile: (FolderRef) -> Unit,
-    onClearFiles: () -> Unit,
-) {
-    var showAllFiles by remember { mutableStateOf(false) }
-    val summary = listOfNotNull(
-        folders.size.takeIf { it > 0 }?.let { "$it folder${if (it > 1) "s" else ""}" },
-        files.size.takeIf { it > 0 }?.let {
-            "${formatCount(it)} file${if (it > 1) "s" else ""} (${formatSize(files.sumOf { f -> f.size })})"
-        },
-    ).joinToString(" · ")
-
-    SectionCard(
-        title = "Copy from",
-        subtitle = summary.ifEmpty { "Folders or files — internal storage, SD card or USB OTG" },
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            folders.forEach { ref ->
-                FolderRow(ref, "📁", if (enabled) ({ onRemoveFolder(ref) }) else null)
-            }
-
-            val visible = if (showAllFiles) files else files.take(FILES_PREVIEW)
-            visible.forEach { ref ->
-                FolderRow(ref, "📄", if (enabled) ({ onRemoveFile(ref) }) else null)
-            }
-            if (files.size > FILES_PREVIEW || (files.size > 1 && enabled)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (files.size > FILES_PREVIEW) {
-                        TextButton(onClick = { showAllFiles = !showAllFiles }) {
-                            Text(if (showAllFiles) "Show less" else "Show all ${formatCount(files.size)} files")
-                        }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    if (enabled && files.size > 1) {
-                        TextButton(onClick = onClearFiles) {
-                            Text("Remove all files", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilledTonalButton(
-                    onClick = onAddFolder,
-                    enabled = enabled,
-                    modifier = Modifier.weight(1f).height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Folder")
-                }
-                FilledTonalButton(
-                    onClick = onAddFiles,
-                    enabled = enabled,
-                    modifier = Modifier.weight(1f).height(48.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp),
-                ) {
-                    Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Files")
-                }
-            }
-            if (files.isEmpty() && enabled) {
+        labels.forEachIndexed { i, label ->
+            val on = i == selected
+            Box(
+                Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (on) cs.surface else cs.surfaceContainerHighest)
+                    .clickable { onSelect(i) }
+                    .padding(vertical = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    "Files: long-press to select several at once",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    label,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium,
+                    color = if (on) cs.primary else cs.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
     }
 }
 
-private const val FILES_PREVIEW = 5
-
+/** Settings shared by folder pairs and quick copy. */
 @Composable
-private fun DestinationCard(dest: FolderRef?, enabled: Boolean, onPick: () -> Unit) {
-    SectionCard(
-        title = "Destination",
-        subtitle = "Folders are copied into their own sub-folder · files go straight here",
-    ) {
-        if (dest == null) {
-            Button(
-                onClick = onPick,
-                enabled = enabled,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(14.dp),
-            ) { Text("Choose destination") }
-        } else {
-            FolderRow(dest, "💾", null)
-            if (enabled) {
-                TextButton(onClick = onPick, modifier = Modifier.align(Alignment.End)) { Text("Change") }
-            }
-        }
-    }
-}
-
-@Composable
-private fun OptionsCard(vm: MainViewModel, enabled: Boolean) {
-    SectionCard(title = "Options") {
+private fun SettingsCard(vm: MainViewModel, enabled: Boolean) {
+    SectionCard(title = "Settings", subtitle = "Used by folder pairs and quick copy") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Parallel copies", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
             Box(
@@ -471,14 +434,6 @@ private fun OptionsCard(vm: MainViewModel, enabled: Boolean) {
         HorizontalDivider(Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
 
         SwitchRow(
-            title = "Mirror",
-            subtitle = if (vm.mirror) "Deletes files in the destination that aren't in the source"
-            else "Off — extra files in the destination are kept",
-            checked = vm.mirror,
-            enabled = enabled,
-            danger = true,
-        ) { vm.mirror = it; vm.save() }
-        SwitchRow(
             title = "Keep screen on",
             subtitle = "While copying (copy also continues with the screen off)",
             checked = vm.keepScreenOn,
@@ -504,88 +459,11 @@ private fun OptionsCard(vm: MainViewModel, enabled: Boolean) {
             Text(
                 "${vm.retries}",
                 modifier = Modifier.width(36.dp),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                textAlign = TextAlign.Center,
                 fontWeight = FontWeight.Bold,
             )
             StepButton("+", enabled && vm.retries < 10) { vm.retries++; vm.save() }
         }
-
-        HorizontalDivider(Modifier.padding(vertical = 12.dp), color = MaterialTheme.colorScheme.outlineVariant)
-
-        Text("Exclude", style = MaterialTheme.typography.bodyLarge)
-        Text(
-            "Separate with ;  — * and ? wildcards",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = vm.excludeFiles,
-            onValueChange = { vm.excludeFiles = it },
-            label = { Text("Files") },
-            placeholder = { Text("*.tmp; Thumbs.db") },
-            singleLine = true,
-            enabled = enabled,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Spacer(Modifier.height(8.dp))
-        OutlinedTextField(
-            value = vm.excludeDirs,
-            onValueChange = { vm.excludeDirs = it },
-            label = { Text("Folders") },
-            placeholder = { Text(".thumbnails; .trash*") },
-            singleLine = true,
-            enabled = enabled,
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-@Composable
-private fun StepButton(label: String, enabled: Boolean, onClick: () -> Unit) {
-    FilledTonalButton(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = Modifier.size(40.dp),
-        shape = RoundedCornerShape(12.dp),
-        contentPadding = PaddingValues(0.dp),
-    ) { Text(label, fontSize = 20.sp) }
-}
-
-@Composable
-private fun SwitchRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    enabled: Boolean,
-    danger: Boolean = false,
-    onChange: (Boolean) -> Unit,
-) {
-    val err = MaterialTheme.colorScheme.error
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChange)
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (danger && checked) err else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = null,
-            enabled = enabled,
-            colors = if (danger) SwitchDefaults.colors(checkedTrackColor = err) else SwitchDefaults.colors(),
-        )
     }
 }
 
@@ -595,15 +473,17 @@ private fun SwitchRow(
 private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val now = if (st.finishedAt > 0) st.finishedAt else System.currentTimeMillis()
-    val hasErrors = st.failed > 0 || st.phase == Phase.FAILED
+    val hasErrors = st.hasErrors
+    val queue = st.isQueue
     val (title, accent) = when (st.phase) {
         Phase.SCANNING -> "Scanning folders…" to cs.primary
         Phase.DELETING -> "Removing extra files…" to Warn
         Phase.PREPARING -> "Creating folders…" to cs.primary
-        Phase.COPYING -> (if (st.dryRun) "Checking…" else "Copying…") to cs.primary
+        Phase.COPYING -> (if (st.dryRun) "Checking…" else if (queue) "Syncing…" else "Copying…") to cs.primary
         Phase.DONE -> when {
             hasErrors -> "Finished with errors" to cs.error
             st.dryRun -> "Preview complete" to Success
+            queue -> "All pairs synced" to Success
             else -> "All done" to Success
         }
         Phase.CANCELLED -> "Stopped" to cs.error
@@ -635,7 +515,27 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
                 if (st.dryRun) Badge("PREVIEW", cs.primary)
                 if (st.finished) TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
+
+            if (queue && st.running) {
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Badge("PAIR ${st.taskIndex + 1} / ${st.taskCount}", cs.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        st.taskLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                if (st.taskCount > 1) {
+                    Spacer(Modifier.height(8.dp))
+                    QueueDots(done = st.results, index = st.taskIndex, count = st.taskCount)
+                }
+            }
             if (st.running && st.phase != Phase.COPYING && st.message.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
                 Text(
                     st.message + if (st.phase == Phase.SCANNING) " · ${formatCount(st.scanned)} items" else "",
                     style = MaterialTheme.typography.bodySmall,
@@ -673,7 +573,8 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
                 )
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        "${formatCount(st.filesDone)} / ${formatCount(st.filesToCopy)} files",
+                        "${formatCount(st.filesDone)} / ${formatCount(st.filesToCopy)} files" +
+                            if (queue && st.running) " (this pair)" else "",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Text(
@@ -729,52 +630,84 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
                     )
                 }
             }
+
+            if (st.finished && queue && st.results.isNotEmpty()) {
+                Spacer(Modifier.height(14.dp))
+                Text("Results", style = MaterialTheme.typography.labelLarge, color = cs.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    st.results.forEach { ResultRow(it, st.dryRun) }
+                    val notRun = st.taskCount - st.results.size
+                    if (notRun > 0) {
+                        Text(
+                            "■ $notRun pair${if (notRun > 1) "s" else ""} not started",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One dot per pair in the queue: done (coloured by result), running, waiting. */
+@Composable
+private fun QueueDots(done: List<TaskResult>, index: Int, count: Int) {
+    val cs = MaterialTheme.colorScheme
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (i in 0 until count.coerceAtMost(24)) {
+            val color = when {
+                i < done.size -> when (done[i].status) {
+                    TaskStatus.OK -> Success
+                    TaskStatus.ERRORS -> Warn
+                    else -> cs.error
+                }
+                i == index -> cs.primary
+                else -> cs.outlineVariant
+            }
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(color),
+            )
         }
     }
 }
 
 @Composable
-private fun Badge(text: String, color: Color) {
-    Box(
+private fun ResultRow(r: TaskResult, dryRun: Boolean) {
+    val cs = MaterialTheme.colorScheme
+    val (icon, color) = when (r.status) {
+        TaskStatus.OK -> "✓" to Success
+        TaskStatus.ERRORS -> "⚠" to Warn
+        TaskStatus.FAILED -> "✖" to cs.error
+        TaskStatus.CANCELLED -> "■" to cs.onSurfaceVariant
+    }
+    Row(
         Modifier
-            .padding(end = 4.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(color.copy(alpha = 0.12f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
-    ) {
-        Text(text, color = color, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-    }
-}
-
-@Composable
-private fun StatTile(label: String, value: String, modifier: Modifier) {
-    Column(
-        modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .background(color.copy(alpha = 0.07f))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
-    }
-}
-
-@Composable
-private fun CountTile(label: String, value: Int, color: Color, modifier: Modifier) {
-    Column(
-        modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(color.copy(alpha = 0.08f))
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(formatCount(value), color = color, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
-        Text(
-            label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
+        Text(icon, color = color, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(r.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                resultSummary(r, dryRun),
+                style = MaterialTheme.typography.bodySmall,
+                color = cs.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(formatDuration(r.durationMs), style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
     }
 }
 
@@ -830,7 +763,15 @@ private fun LogCard(lines: List<LogLine>, canShare: Boolean, onShare: () -> Unit
 }
 
 @Composable
-private fun BottomActions(running: Boolean, onPreview: () -> Unit, onStart: () -> Unit, onStop: () -> Unit) {
+private fun BottomActions(
+    running: Boolean,
+    primaryLabel: String,
+    primaryEnabled: Boolean,
+    onPreview: () -> Unit,
+    onPrimary: () -> Unit,
+    onStop: () -> Unit,
+    primaryIsSync: Boolean = false,
+) {
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 12.dp) {
         Row(
             Modifier
@@ -849,17 +790,19 @@ private fun BottomActions(running: Boolean, onPreview: () -> Unit, onStart: () -
             } else {
                 OutlinedButton(
                     onClick = onPreview,
+                    enabled = primaryEnabled,
                     modifier = Modifier.weight(1f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                 ) { Text("Preview") }
                 Button(
-                    onClick = onStart,
-                    modifier = Modifier.weight(1.5f).height(54.dp),
+                    onClick = onPrimary,
+                    enabled = primaryEnabled,
+                    modifier = Modifier.weight(1.8f).height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                 ) {
-                    Icon(Icons.Filled.PlayArrow, null)
+                    Icon(if (primaryIsSync) Icons.Filled.Refresh else Icons.Filled.PlayArrow, null)
                     Spacer(Modifier.width(6.dp))
-                    Text("Start copy", style = MaterialTheme.typography.titleMedium)
+                    Text(primaryLabel, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }

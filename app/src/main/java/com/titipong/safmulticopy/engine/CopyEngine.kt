@@ -7,6 +7,7 @@ import android.provider.DocumentsContract.Document
 import com.titipong.safmulticopy.util.formatCount
 import com.titipong.safmulticopy.util.formatDuration
 import com.titipong.safmulticopy.util.formatSize
+import com.titipong.safmulticopy.util.resultSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
@@ -18,21 +19,26 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedWriter
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Copy pipeline:
- *  1. scan every source and its destination folder (one query per folder)
+ * Runs the tasks of a request one after another. For each task:
+ *  1. scan the source(s) and the destination (one query per folder)
  *  2. compare in memory: new / changed files are queued, identical ones skipped
  *  3. mirror only: delete extras in the destination (before copying, frees space)
  *  4. create missing folders (in order, parents first)
  *  5. copy the queue with N workers in parallel
+ *
+ * A task that fails (e.g. a drive was unplugged) is recorded and the next task still runs.
+ * Stop cancels the whole queue.
  *
  * SAF cannot set a file's "last modified" time, so a copied file gets the copy time.
  * A file is therefore treated as unchanged when the size matches and the source is
@@ -44,23 +50,38 @@ class CopyEngine(
     private val publish: (CopyState) -> Unit,
 ) {
     private val cr = context.contentResolver
-    private val excludeFiles = GlobSet(req.excludeFiles)
-    private val excludeDirs = GlobSet(req.excludeDirs)
+
+    // The task that is running now.
+    @Volatile private var task: CopyTask = req.tasks.first()
+    @Volatile private var taskIndex = 0
+    private var excludeFiles = GlobSet(emptyList())
+    private var excludeDirs = GlobSet(emptyList())
 
     @Volatile private var phase = Phase.SCANNING
     @Volatile private var message = "Starting…"
+
+    // Per task
     @Volatile private var filesToCopy = 0
     @Volatile private var bytesToCopy = 0L
     @Volatile private var scanned = 0
     private val filesDone = AtomicInteger()
     private val bytesDone = AtomicLong()
+    @Volatile private var copyStartedAt = 0L
+
+    // Totals of finished tasks
+    private var aggFilesToCopy = 0
+    private var aggBytesToCopy = 0L
+    private var aggFilesDone = 0
+    private var aggBytesDone = 0L
+
+    // Totals across the whole run
     private val copied = AtomicInteger()
     private val skipped = AtomicInteger()
     private val failed = AtomicInteger()
     private val deleted = AtomicInteger()
     private val current = ConcurrentHashMap<Int, String>()
+    private val results = CopyOnWriteArrayList<TaskResult>()
     private val startedAt = System.currentTimeMillis()
-    @Volatile private var copyStartedAt = 0L
     @Volatile private var finishedAt = 0L
 
     private val logLock = Any()
@@ -94,14 +115,18 @@ class CopyEngine(
             }
         }
         try {
-            work()
+            log(if (req.dryRun) "PREVIEW — nothing will be copied or deleted" else "COPY", Level.HEAD)
+            for ((i, t) in req.tasks.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                runTask(i, t)
+            }
             phase = Phase.DONE
         } catch (e: CancellationException) {
             phase = Phase.CANCELLED
             log("■ Stopped by user", Level.ERROR)
         } catch (e: Exception) {
             phase = Phase.FAILED
-            log("✖ Error: ${e.message ?: e.javaClass.simpleName}", Level.ERROR)
+            log("✖ Error: ${describe(e)}", Level.ERROR)
         } finally {
             ticker.cancel()
             current.clear()
@@ -113,23 +138,83 @@ class CopyEngine(
         }
     }
 
-    // ------------------------------------------------------------------ pipeline
+    // ------------------------------------------------------------------ tasks
 
-    private suspend fun work() {
-        val destTree = req.destination
+    private suspend fun runTask(index: Int, t: CopyTask) {
+        task = t
+        taskIndex = index
+        excludeFiles = GlobSet(t.excludeFiles)
+        excludeDirs = GlobSet(t.excludeDirs)
+        filesToCopy = 0
+        bytesToCopy = 0
+        scanned = 0
+        filesDone.set(0)
+        bytesDone.set(0)
+        copyStartedAt = 0
+        phase = Phase.SCANNING
+        message = "Starting…"
+
+        val c0 = copied.get()
+        val s0 = skipped.get()
+        val f0 = failed.get()
+        val d0 = deleted.get()
+        val t0 = System.currentTimeMillis()
+        if (req.tasks.size > 1 || t.id != null) {
+            log("", Level.DIM)
+            log("━━ ${index + 1}/${req.tasks.size} · ${t.label}", Level.HEAD)
+        }
+
+        var status = TaskStatus.OK
+        var error: String? = null
+        try {
+            if (t.intoSubfolders) runQuickCopy(t) else runPair(t)
+        } catch (e: CancellationException) {
+            status = TaskStatus.CANCELLED
+            throw e
+        } catch (e: Exception) {
+            status = TaskStatus.FAILED
+            error = describe(e)
+            log("✖ ${t.label}: $error", Level.ERROR)
+        } finally {
+            current.clear()
+            aggFilesToCopy += filesToCopy
+            aggBytesToCopy += bytesToCopy
+            aggFilesDone += filesDone.get()
+            val taskBytes = bytesDone.get().coerceAtLeast(0)
+            aggBytesDone += taskBytes
+            val fd = failed.get() - f0
+            if (status == TaskStatus.OK && fd > 0) status = TaskStatus.ERRORS
+            val r = TaskResult(
+                id = t.id,
+                label = t.label,
+                status = status,
+                copied = copied.get() - c0,
+                skipped = skipped.get() - s0,
+                failed = fd,
+                deleted = deleted.get() - d0,
+                bytes = taskBytes,
+                durationMs = System.currentTimeMillis() - t0,
+                error = error,
+            )
+            results += r
+        }
+    }
+
+    /** Quick copy: each source folder becomes a sub-folder of the destination; files go straight in. */
+    private suspend fun runQuickCopy(t: CopyTask) {
+        val destTree = t.destination
         val destRootId = Saf.rootId(destTree)
-        log(if (req.dryRun) "PREVIEW — nothing will be copied or deleted" else "COPY", Level.HEAD)
         log("Destination: ${Saf.locationLabel(destTree)}", Level.INFO)
 
         val destChildren = Saf.listChildren(cr, destTree, destRootId)
-        val names = uniqueNames(req.sources.map { Saf.displayName(cr, it) ?: Saf.fallbackName(it) })
+        val names = uniqueNames(t.sources.map { Saf.displayName(cr, it) ?: Saf.fallbackName(it) })
 
         val plans = ArrayList<Plan>()
-        for ((i, srcTree) in req.sources.withIndex()) {
+        for ((i, srcTree) in t.sources.withIndex()) {
             currentCoroutineContext().ensureActive()
             val name = names[i]
             message = "Scanning $name…"
-            log("[${i + 1}/${req.sources.size}] $name  (${Saf.locationLabel(srcTree)})", Level.HEAD)
+            log("[${i + 1}/${t.sources.size}] $name  (${Saf.locationLabel(srcTree)})", Level.HEAD)
 
             val base = scanned
             val src = Saf.scan(cr, srcTree, Saf.rootId(srcTree), excludeFiles, excludeDirs) { scanned = base + it }
@@ -151,20 +236,39 @@ class CopyEngine(
             plans += buildPlan(srcTree, destTree, name, existing?.docId, src, dest)
         }
 
-        if (req.files.isNotEmpty()) {
+        if (t.files.isNotEmpty()) {
             currentCoroutineContext().ensureActive()
             plans += planPickedFiles(destTree, destRootId, destChildren, names)
         }
+        execute(plans, destTree, destRootId)
+    }
 
+    /** Folder pair: the contents of the source are synced directly into the destination. */
+    private suspend fun runPair(t: CopyTask) {
+        val srcTree = t.sources.first()
+        val destTree = t.destination
+        val destRootId = Saf.rootId(destTree)
+        log("${Saf.locationLabel(srcTree)}  →  ${Saf.locationLabel(destTree)}", Level.INFO)
+
+        message = "Scanning source…"
+        val src = Saf.scan(cr, srcTree, Saf.rootId(srcTree), excludeFiles, excludeDirs) { scanned = it }
+        message = "Checking destination…"
+        val base = scanned
+        val dest = Saf.scan(cr, destTree, destRootId, excludeFiles, excludeDirs) { scanned = base + it }
+        log("  ${formatCount(src.files.size)} files in ${formatCount(src.dirs.size)} folders", Level.INFO)
+
+        execute(listOf(buildPlan(srcTree, destTree, "", destRootId, src, dest)), destTree, destRootId)
+    }
+
+    private suspend fun execute(plans: List<Plan>, destTree: Uri, destRootId: String) {
         filesToCopy = plans.sumOf { it.jobs.size }
         bytesToCopy = plans.sumOf { p -> p.jobs.sumOf { it.src.size } }
         log(
-            "To copy: ${formatCount(filesToCopy)} files (${formatSize(bytesToCopy)}) · " +
-                "unchanged: ${formatCount(skipped.get())}",
+            "  To copy: ${formatCount(filesToCopy)} files (${formatSize(bytesToCopy)})",
             Level.INFO,
         )
 
-        if (req.mirror) deleteExtras(plans, destTree)
+        if (task.mirror) deleteExtras(plans, destTree)
 
         if (!req.dryRun) {
             phase = Phase.PREPARING
@@ -177,7 +281,7 @@ class CopyEngine(
         copyStartedAt = System.currentTimeMillis()
         val all = plans.flatMap { it.jobs }
         if (all.isEmpty()) {
-            log("✓ Nothing to copy — everything is up to date", Level.OK)
+            log("  ✓ Nothing to copy — everything is up to date", Level.OK)
             return
         }
 
@@ -194,6 +298,8 @@ class CopyEngine(
         }
     }
 
+    // ------------------------------------------------------------------ planning
+
     private fun buildPlan(
         srcTree: Uri,
         destTree: Uri,
@@ -202,6 +308,7 @@ class CopyEngine(
         src: ScanResult,
         dest: ScanResult,
     ): Plan {
+        val mirror = task.mirror
         val dirIds = ConcurrentHashMap<String, String>()
         if (existingRootId != null) {
             dirIds[""] = existingRootId
@@ -211,7 +318,7 @@ class CopyEngine(
 
         // A source folder where the destination has a file (only fixable by mirror).
         val blocked = HashSet<String>()
-        if (!req.mirror) {
+        if (!mirror) {
             for ((k, d) in src.dirs) if (dest.files.containsKey(k)) {
                 blocked += k
                 log("  ✖ Mismatch: \"${d.rel}\" is a folder in source but a file in destination", Level.ERROR)
@@ -226,7 +333,7 @@ class CopyEngine(
                 continue
             }
             if (dest.dirs.containsKey(k)) {
-                if (!req.mirror) {
+                if (!mirror) {
                     log("  ✖ Mismatch: \"${f.rel}\" is a file in source but a folder in destination", Level.ERROR)
                     failed.incrementAndGet()
                 } else {
@@ -255,7 +362,7 @@ class CopyEngine(
             .map { it.rel }
             .sortedBy { rel -> rel.count { it == '/' } }
 
-        val deletions = if (req.mirror) extras(src, dest) else emptyList()
+        val deletions = if (mirror) extras(src, dest) else emptyList()
         return Plan(target, jobs, dirsToCreate, deletions)
     }
 
@@ -269,15 +376,16 @@ class CopyEngine(
         destChildren: List<DocEntry>,
         folderTargets: List<String>,
     ): Plan {
+        val files = task.files
         message = "Checking selected files…"
-        log("[Files] ${formatCount(req.files.size)} selected → destination folder", Level.HEAD)
+        log("[Files] ${formatCount(files.size)} selected → destination folder", Level.HEAD)
         val target = Target(destTree, "", ConcurrentHashMap(mapOf("" to destRootId)))
         val destFiles = destChildren.filter { !it.isDir }.associateBy { it.name.lowercase() }
         val takenByFolders = destChildren.filter { it.isDir }.map { it.name.lowercase() }.toSet() +
             folderTargets.map { it.lowercase() }
         val seen = HashSet<String>()
         val jobs = ArrayList<CopyJob>()
-        for (uri in req.files) {
+        for (uri in files) {
             val info = Saf.fileInfo(cr, uri)
             if (info == null) {
                 failed.incrementAndGet()
@@ -377,7 +485,7 @@ class CopyEngine(
                 ) ?: throw IOException("provider returned nothing")
                 ids[key] = DocumentsContract.getDocumentId(uri)
             } catch (e: Exception) {
-                log("  ✖ Cannot create folder ${p.target.name}/$rel — ${e.message}", Level.ERROR)
+                log("  ✖ Cannot create folder ${label(p.target, rel)} — ${e.message}", Level.ERROR)
             }
         }
     }
@@ -470,6 +578,12 @@ class CopyEngine(
 
     // ------------------------------------------------------------------ helpers
 
+    private fun describe(e: Exception): String = when (e) {
+        is SecurityException -> "no access to the folder — open it and pick the folder again"
+        is FileNotFoundException -> "folder not found (deleted, renamed or the drive is unplugged)"
+        else -> e.message ?: e.javaClass.simpleName
+    }
+
     private fun uniqueNames(raw: List<String>): List<String> {
         val used = HashMap<String, Int>()
         return raw.map { n ->
@@ -482,15 +596,17 @@ class CopyEngine(
 
     private fun publishNow() {
         val lines = synchronized(logLock) { logLines.toList() }
+        val done = finishedAt > 0
+        val t = task
         publish(
             CopyState(
                 phase = phase,
                 dryRun = req.dryRun,
                 message = message,
-                filesToCopy = filesToCopy,
-                bytesToCopy = bytesToCopy,
-                filesDone = filesDone.get(),
-                bytesDone = bytesDone.get().coerceAtLeast(0),
+                filesToCopy = if (done) aggFilesToCopy else filesToCopy,
+                bytesToCopy = if (done) aggBytesToCopy else bytesToCopy,
+                filesDone = if (done) aggFilesDone else filesDone.get(),
+                bytesDone = if (done) aggBytesDone else bytesDone.get().coerceAtLeast(0),
                 scanned = scanned,
                 copied = copied.get(),
                 skipped = skipped.get(),
@@ -498,8 +614,14 @@ class CopyEngine(
                 deleted = deleted.get(),
                 current = current.values.toList(),
                 startedAt = startedAt,
-                copyStartedAt = copyStartedAt,
+                copyStartedAt = if (done) startedAt else copyStartedAt,
                 finishedAt = finishedAt,
+                taskIndex = taskIndex,
+                taskCount = req.tasks.size,
+                taskLabel = t.label,
+                taskId = t.id,
+                pendingIds = if (done) emptyList() else req.tasks.drop(taskIndex + 1).mapNotNull { it.id },
+                results = results.toList(),
                 log = lines,
                 logFile = logFile?.absolutePath,
             ),
@@ -522,16 +644,21 @@ class CopyEngine(
             val dir = (context.getExternalFilesDir("logs") ?: File(context.filesDir, "logs")).apply { mkdirs() }
             dir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(30)?.forEach { it.delete() }
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val f = File(dir, "copy_$stamp${if (req.dryRun) "_preview" else ""}.txt")
+            val kind = if (req.tasks.any { it.id != null }) "sync" else "copy"
+            val f = File(dir, "${kind}_$stamp${if (req.dryRun) "_preview" else ""}.txt")
             logFile = f
             logWriter = f.bufferedWriter()
             logWriter?.write("SAF MultiCopy — ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
             logWriter?.newLine()
-            logWriter?.write(
-                "Threads: ${req.threads} · Retries: ${req.retries} · Mirror: ${req.mirror} · " +
-                    "Exclude files: ${req.excludeFiles} · Exclude folders: ${req.excludeDirs}",
-            )
+            logWriter?.write("Threads: ${req.threads} · Retries: ${req.retries} · Tasks: ${req.tasks.size}")
             logWriter?.newLine()
+            for (t in req.tasks) {
+                logWriter?.write(
+                    "  • ${t.label} — mirror: ${t.mirror} · exclude files: ${t.excludeFiles} · " +
+                        "exclude folders: ${t.excludeDirs}",
+                )
+                logWriter?.newLine()
+            }
         }
     }
 
@@ -546,12 +673,32 @@ class CopyEngine(
         val took = formatDuration(finishedAt - startedAt)
         val verb = if (req.dryRun) "Would copy" else "Copied"
         log("────────────────────────", Level.DIM)
+        if (req.tasks.size > 1) {
+            for (r in results) {
+                val icon = when (r.status) {
+                    TaskStatus.OK -> "✓"
+                    TaskStatus.ERRORS -> "⚠"
+                    TaskStatus.FAILED -> "✖"
+                    TaskStatus.CANCELLED -> "■"
+                }
+                log(
+                    "$icon ${r.label}: ${resultSummary(r, req.dryRun)}",
+                    if (r.status == TaskStatus.OK) Level.OK else Level.ERROR,
+                )
+            }
+            val notRun = req.tasks.size - results.size
+            if (notRun > 0) log("■ $notRun not started", Level.ERROR)
+        }
         log(
             "$verb ${formatCount(copied.get())} · unchanged ${formatCount(skipped.get())} · " +
                 "failed ${formatCount(failed.get())}" +
-                (if (req.mirror) " · ${if (req.dryRun) "would delete" else "deleted"} ${formatCount(deleted.get())}" else "") +
-                " · ${formatSize(bytesDone.get().coerceAtLeast(0))} · $took",
-            if (failed.get() > 0 || phase != Phase.DONE) Level.ERROR else Level.OK,
+                (if (req.tasks.any { it.mirror }) " · ${if (req.dryRun) "would delete" else "deleted"} ${formatCount(deleted.get())}" else "") +
+                " · ${formatSize(aggBytesDone)} · $took",
+            if (failed.get() > 0 || phase != Phase.DONE || results.any { it.status == TaskStatus.FAILED }) {
+                Level.ERROR
+            } else {
+                Level.OK
+            },
         )
     }
 

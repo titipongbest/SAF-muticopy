@@ -6,31 +6,62 @@ enum class Phase { IDLE, SCANNING, DELETING, PREPARING, COPYING, DONE, CANCELLED
 
 enum class Level { HEAD, INFO, OK, WARN, ERROR, DIM }
 
+enum class TaskStatus { OK, ERRORS, FAILED, CANCELLED }
+
 data class LogLine(val text: String, val level: Level)
 
-data class CopyRequest(
+/**
+ * One unit of work in the queue.
+ *  - Quick copy: [intoSubfolders] = true — each source folder becomes a sub-folder of the
+ *    destination, picked [files] go straight into it.
+ *  - Folder pair: [intoSubfolders] = false — the contents of the single source are synced
+ *    directly into the destination folder.
+ */
+data class CopyTask(
+    val id: String?,
+    val label: String,
     val sources: List<Uri>,
-    /** Individually picked files; copied straight into the destination folder. */
     val files: List<Uri>,
     val destination: Uri,
-    val threads: Int,
-    val retries: Int,
+    val intoSubfolders: Boolean,
     val mirror: Boolean,
-    val dryRun: Boolean,
-    val showSkipped: Boolean,
     val excludeFiles: List<String>,
     val excludeDirs: List<String>,
+)
+
+/** Tasks run one after another, in order. */
+data class CopyRequest(
+    val tasks: List<CopyTask>,
+    val threads: Int,
+    val retries: Int,
+    val dryRun: Boolean,
+    val showSkipped: Boolean,
+)
+
+data class TaskResult(
+    val id: String?,
+    val label: String,
+    val status: TaskStatus,
+    val copied: Int,
+    val skipped: Int,
+    val failed: Int,
+    val deleted: Int,
+    val bytes: Long,
+    val durationMs: Long,
+    val error: String? = null,
 )
 
 data class CopyState(
     val phase: Phase = Phase.IDLE,
     val dryRun: Boolean = false,
     val message: String = "",
+    // Progress of the task that is running now (totals of all tasks once finished).
     val filesToCopy: Int = 0,
     val bytesToCopy: Long = 0,
     val filesDone: Int = 0,
     val bytesDone: Long = 0,
     val scanned: Int = 0,
+    // Totals across all tasks so far.
     val copied: Int = 0,
     val skipped: Int = 0,
     val failed: Int = 0,
@@ -39,6 +70,13 @@ data class CopyState(
     val startedAt: Long = 0,
     val copyStartedAt: Long = 0,
     val finishedAt: Long = 0,
+    // Queue
+    val taskIndex: Int = 0,
+    val taskCount: Int = 0,
+    val taskLabel: String = "",
+    val taskId: String? = null,
+    val pendingIds: List<String> = emptyList(),
+    val results: List<TaskResult> = emptyList(),
     val log: List<LogLine> = emptyList(),
     val logFile: String? = null,
 ) {
@@ -48,4 +86,11 @@ data class CopyState(
 
     val finished: Boolean
         get() = phase == Phase.DONE || phase == Phase.CANCELLED || phase == Phase.FAILED
+
+    val hasErrors: Boolean
+        get() = failed > 0 || phase == Phase.FAILED || results.any { it.status == TaskStatus.FAILED }
+
+    /** True when the queue came from folder pairs (or has several tasks). */
+    val isQueue: Boolean
+        get() = taskCount > 1 || taskId != null
 }

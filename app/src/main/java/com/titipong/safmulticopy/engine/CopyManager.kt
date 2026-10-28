@@ -3,6 +3,7 @@ package com.titipong.safmulticopy.engine
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.titipong.safmulticopy.data.PairStore
 import com.titipong.safmulticopy.service.CopyService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,13 +22,18 @@ object CopyManager {
     @Volatile private var job: Job? = null
 
     fun start(context: Context, req: CopyRequest) {
-        if (_state.value.running) return
+        if (_state.value.running || req.tasks.isEmpty()) return
         pending = req
+        val first = req.tasks.first()
         _state.value = CopyState(
             phase = Phase.SCANNING,
             dryRun = req.dryRun,
             message = "Starting…",
             startedAt = System.currentTimeMillis(),
+            taskCount = req.tasks.size,
+            taskLabel = first.label,
+            taskId = first.id,
+            pendingIds = req.tasks.drop(1).mapNotNull { it.id },
         )
         ContextCompat.startForegroundService(context, Intent(context, CopyService::class.java))
     }
@@ -46,6 +52,11 @@ object CopyManager {
         pending = null
         val j = scope.launch(Dispatchers.IO) {
             CopyEngine(context, req) { _state.value = it }.run()
+            // Remember the outcome on each folder pair (not for previews).
+            if (!req.dryRun) {
+                val s = _state.value
+                runCatching { PairStore.get(context).recordResults(s.results, s.finishedAt) }
+            }
         }
         job = j
         return j

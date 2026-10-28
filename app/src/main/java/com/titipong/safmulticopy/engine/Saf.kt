@@ -166,6 +166,16 @@ object Saf {
         return result
     }
 
+    /** True if the folder [child] is [parent] itself or somewhere inside it (same storage only). */
+    fun isSameOrInside(child: Uri, parent: Uri): Boolean {
+        if (child.authority != parent.authority) return false
+        val c = runCatching { rootId(child) }.getOrNull() ?: return false
+        val p = runCatching { rootId(parent) }.getOrNull() ?: return false
+        if (c.equals(p, ignoreCase = true)) return true
+        val prefix = if (p.endsWith(":") || p.endsWith("/")) p else "$p/"
+        return c.startsWith(prefix, ignoreCase = true)
+    }
+
     fun parentKey(key: String): String = key.substringBeforeLast('/', "")
 
     /** True if any ancestor folder of [key] is in [set]. */

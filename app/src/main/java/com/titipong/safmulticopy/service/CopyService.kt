@@ -144,9 +144,10 @@ class CopyService : Service() {
         } else {
             s.message
         }
+        val queuePrefix = if (s.isQueue) "${s.taskIndex + 1}/${s.taskCount} ${s.taskLabel} · " else ""
         return NotificationCompat.Builder(this, CH_PROGRESS)
             .setSmallIcon(R.drawable.ic_stat_copy)
-            .setContentTitle(title)
+            .setContentTitle(queuePrefix + title)
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -161,8 +162,9 @@ class CopyService : Service() {
     private fun doneNotification(s: CopyState): Notification {
         val title = when {
             s.phase == Phase.CANCELLED -> "Copy stopped"
-            s.phase == Phase.FAILED || s.failed > 0 -> "Finished with errors"
+            s.hasErrors -> "Finished with errors"
             s.dryRun -> "Preview finished"
+            s.isQueue -> "Synced ${s.results.size} folder pair${if (s.results.size > 1) "s" else ""}"
             else -> "Copy finished"
         }
         val text = "${if (s.dryRun) "Would copy" else "Copied"} ${formatCount(s.copied)} · " +

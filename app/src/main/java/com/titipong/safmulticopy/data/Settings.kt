@@ -6,6 +6,11 @@ import androidx.core.content.edit
 class Settings(context: Context) {
     private val p = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    /** 0 = Folder pairs, 1 = Quick copy */
+    var tab: Int
+        get() = p.getInt("tab", 0)
+        set(v) = p.edit { putInt("tab", v) }
+
     var sources: List<String>
         get() = p.getString("sources", null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         set(v) = p.edit { putString("sources", v.joinToString("\n")) }
