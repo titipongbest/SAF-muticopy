@@ -91,9 +91,7 @@ GitHub Actions ดึงคีย์จาก repository secrets (Settings → S
 | Secret | ค่า |
 |---|---|
 | `RELEASE_KEYSTORE_BASE64` | ไฟล์ `.jks` ที่แปลงเป็น base64 |
-| `RELEASE_KEYSTORE_PASSWORD` | รหัสผ่านของ keystore |
-| `RELEASE_KEY_ALIAS` | `northxbar` |
-| `RELEASE_KEY_PASSWORD` | รหัสผ่านของคีย์ (เท่ากับรหัส keystore) |
+| `RELEASE_KEYSTORE_PASSWORD` | รหัสผ่านของ keystore (คีย์ใช้รหัสเดียวกัน, alias `northxbar`) |
 
 ถ้าไม่มี secrets ครบ การ build บน GitHub จะหยุดพร้อมแจ้ง error (ไม่มีการปล่อย APK ที่เซ็นด้วยคีย์อื่น)
 **เก็บไฟล์ `.jks` และรหัสผ่านไว้ให้ดี** — ถ้าหาย จะอัปเดตทับแอปเดิมไม่ได้อีก

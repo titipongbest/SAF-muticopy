@@ -25,9 +25,11 @@ android {
         if (releaseKeystore != null) {
             create("release") {
                 storeFile = releaseKeystore
-                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
-                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                val password = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                storePassword = password
+                // The alias isn't secret, and a PKCS12 key uses the keystore's password.
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")?.takeIf { it.isNotBlank() } ?: "northxbar"
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")?.takeIf { it.isNotBlank() } ?: password
                 enableV1Signing = true
                 enableV2Signing = true
             }

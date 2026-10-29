@@ -31,7 +31,7 @@ jobs:
           KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
         run: |
           if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::Release key secrets are missing — add RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD (see README, Signing)."
+            echo "::error::Release key secrets are missing — add RELEASE_KEYSTORE_BASE64 and RELEASE_KEYSTORE_PASSWORD (see README, Signing)."
             exit 1
           fi
           echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
@@ -40,8 +40,6 @@ jobs:
       - name: Build release APK
         env:
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
