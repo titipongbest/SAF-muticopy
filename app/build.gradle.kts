@@ -14,17 +14,23 @@ android {
         applicationId = "com.titipong.safmulticopy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
-    // คีย์คงที่ (เก็บใน repo) เพื่อให้ติดตั้งเวอร์ชันใหม่ทับของเดิมได้โดยไม่ต้องถอนแอป
+    // Release key — never stored in the repo. GitHub Actions restores it from repository secrets
+    // (see README "Signing"). Without it (e.g. a local build) the release APK is left unsigned.
+    val releaseKeystore = System.getenv("RELEASE_KEYSTORE_FILE")?.let { file(it) }?.takeIf { it.exists() }
     signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+                enableV1Signing = true
+                enableV2Signing = true
+            }
         }
     }
 
@@ -33,7 +39,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystore != null) signingConfigs.getByName("release") else null
         }
     }
 

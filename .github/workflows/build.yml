@@ -25,11 +25,33 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The release key lives only in repository secrets (Settings → Secrets and variables → Actions).
+      - name: Restore release key
+        env:
+          KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::Release key secrets are missing — add RELEASE_KEYSTORE_BASE64, RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS and RELEASE_KEY_PASSWORD (see README, Signing)."
+            exit 1
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "RELEASE_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
       - name: Build release APK
+        env:
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
           ./gradlew assembleRelease --stacktrace
           cp app/build/outputs/apk/release/app-release.apk SAF-MultiCopy.apk
+          echo "Signing certificate:"
+          keytool -printcert -jarfile SAF-MultiCopy.apk | grep -E "Owner|SHA256"
+
+      - name: Remove release key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
 
       - uses: actions/upload-artifact@v4
         with:

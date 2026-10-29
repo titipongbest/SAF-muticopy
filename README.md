@@ -14,7 +14,7 @@
 2. แตะ `SAF-MultiCopy.apk` เพื่อดาวน์โหลด
 3. เปิดไฟล์แล้วติดตั้ง (ครั้งแรกต้องอนุญาต "ติดตั้งแอปที่ไม่รู้จัก" ให้เบราว์เซอร์หรือแอปจัดการไฟล์)
 
-เวอร์ชันใหม่ติดตั้งทับของเดิมได้เลย เพราะ build ทุกครั้งเซ็นด้วยคีย์เดียวกัน (`app/debug.keystore`)
+เวอร์ชันใหม่ติดตั้งทับของเดิมได้เลย เพราะทุก build เซ็นด้วย release key เดียวกัน
 
 ## Folder pairs (แท็บแรก)
 
@@ -82,6 +82,21 @@ SAF เพียงอย่างเดียวตั้งวันที่�
 - อ่านรายชื่อไฟล์ทั้งโฟลเดอร์ด้วย query เดียว (ไม่ใช้ `DocumentFile.findFile()` ทีละไฟล์)
 - เทียบไฟล์ต้นทาง/ปลายทางใน memory ครั้งเดียว
 - ก๊อปหลายไฟล์พร้อมกันด้วย coroutines และ buffer 256 KB
+
+## Signing (release key)
+
+APK ทุกตัวเซ็นด้วย release key ส่วนตัว (`CN=NorthXbar`) ซึ่ง **ไม่ได้อยู่ใน repo**
+GitHub Actions ดึงคีย์จาก repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | ค่า |
+|---|---|
+| `RELEASE_KEYSTORE_BASE64` | ไฟล์ `.jks` ที่แปลงเป็น base64 |
+| `RELEASE_KEYSTORE_PASSWORD` | รหัสผ่านของ keystore |
+| `RELEASE_KEY_ALIAS` | `northxbar` |
+| `RELEASE_KEY_PASSWORD` | รหัสผ่านของคีย์ (เท่ากับรหัส keystore) |
+
+ถ้าไม่มี secrets ครบ การ build บน GitHub จะหยุดพร้อมแจ้ง error (ไม่มีการปล่อย APK ที่เซ็นด้วยคีย์อื่น)
+**เก็บไฟล์ `.jks` และรหัสผ่านไว้ให้ดี** — ถ้าหาย จะอัปเดตทับแอปเดิมไม่ได้อีก
 
 ## Build เอง
 

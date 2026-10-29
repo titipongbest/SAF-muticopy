@@ -8,3 +8,8 @@ captures/
 .cxx/
 .kotlin/
 .DS_Store
+
+# Signing keys must never be committed
+*.jks
+*.keystore
+*.p12
