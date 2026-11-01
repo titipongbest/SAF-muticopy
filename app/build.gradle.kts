@@ -14,8 +14,8 @@ android {
         applicationId = "com.titipong.safmulticopy"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     // Release key — never stored in the repo. GitHub Actions restores it from repository secrets
