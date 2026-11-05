@@ -65,6 +65,10 @@ class CopyEngine(
     @Volatile private var message = "Starting…"
 
     // Per task
+    @Volatile private var deletingPath: String? = null
+    @Volatile private var deletingIsDir = false
+    @Volatile private var deleteDone = 0
+    @Volatile private var deleteTotal = 0
     @Volatile private var filesToCopy = 0
     @Volatile private var bytesToCopy = 0L
     @Volatile private var scanned = 0
@@ -165,6 +169,9 @@ class CopyEngine(
         val reason: String? = null,
     )
 
+    /** Something in the destination that mirror removes (a whole folder, or a file). */
+    private class Deletion(val rel: String, val docId: String, val isDir: Boolean)
+
     /** An existing, unchanged copy whose date is wrong (e.g. copied before dates were kept). */
     private class DateFix(val docId: String, val mtime: Long, val label: String, val size: Long)
 
@@ -172,7 +179,7 @@ class CopyEngine(
         val target: Target,
         val jobs: List<CopyJob>,
         val dirsToCreate: List<String>,
-        val deletions: List<Pair<String, String>>,
+        val deletions: List<Deletion>,
         val dateFixes: List<DateFix> = emptyList(),
     )
 
@@ -244,6 +251,9 @@ class CopyEngine(
         excludeDirs = GlobSet(t.excludeDirs)
         filesToCopy = 0
         bytesToCopy = 0
+        deleteDone = 0
+        deleteTotal = 0
+        deletingPath = null
         scanned = 0
         filesDone.set(0)
         bytesDone.set(0)
@@ -559,19 +569,19 @@ class CopyEngine(
     private fun label(target: Target, rel: String) = if (target.name.isEmpty()) rel else "${target.name}/$rel"
 
     /** Destination items that are not in the source. Folders are deleted as a whole. */
-    private fun extras(src: ScanResult, dest: ScanResult): List<Pair<String, String>> {
-        val out = ArrayList<Pair<String, String>>()
+    private fun extras(src: ScanResult, dest: ScanResult): List<Deletion> {
+        val out = ArrayList<Deletion>()
         val removedDirs = HashSet<String>()
         for (d in dest.dirs.values.sortedBy { rel -> rel.rel.count { it == '/' } }) {
             val k = d.rel.lowercase()
             if (k in src.dirs || Saf.underAny(k, removedDirs)) continue
             removedDirs += k
-            out += d.rel to d.docId
+            out += Deletion(d.rel, d.docId, isDir = true)
         }
         for (f in dest.files.values) {
             val k = f.rel.lowercase()
             if (k in src.files || Saf.underAny(k, removedDirs)) continue
-            out += f.rel to f.docId
+            out += Deletion(f.rel, f.docId, isDir = false)
         }
         return out
     }
@@ -580,25 +590,37 @@ class CopyEngine(
         if (plans.none { it.deletions.isNotEmpty() }) return
         phase = Phase.DELETING
         message = "Removing extra files…"
-        for (p in plans) for ((rel, id) in p.deletions) {
-            currentCoroutineContext().ensureActive()
-            val label = label(p.target, rel)
-            if (req.dryRun) {
-                deleted.incrementAndGet()
-                log("  − Would delete: $label", Level.WARN)
-                event(EventKind.WOULD_DELETE, label, 0)
-                continue
+        deleteTotal = plans.sumOf { it.deletions.size }
+        deleteDone = 0
+        try {
+            for (p in plans) for (del in p.deletions) {
+                currentCoroutineContext().ensureActive()
+                val label = label(p.target, del.rel)
+                val what = if (del.isDir) "folder" else "file"
+                deletingIsDir = del.isDir
+                deletingPath = label
+                message = "Deleting ${deleteDone + 1} of $deleteTotal: $label"
+                if (req.dryRun) {
+                    deleted.incrementAndGet()
+                    log("  − Would delete $what: $label", Level.WARN)
+                    event(EventKind.WOULD_DELETE, label, 0, if (del.isDir) "whole folder" else null)
+                } else {
+                    try {
+                        DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, del.docId))
+                        deleted.incrementAndGet()
+                        log("  − Deleted $what: $label", Level.WARN)
+                        event(EventKind.DELETED, label, 0, if (del.isDir) "whole folder" else null)
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        failed.incrementAndGet()
+                        log("  ✖ Cannot delete $label — ${e.message}", Level.ERROR)
+                        event(EventKind.FAILED, label, 0, "can't delete — ${e.message ?: e.javaClass.simpleName}")
+                    }
+                }
+                deleteDone++
             }
-            try {
-                DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, id))
-                deleted.incrementAndGet()
-                log("  − Deleted: $label", Level.WARN)
-                event(EventKind.DELETED, label, 0)
-            } catch (e: Exception) {
-                failed.incrementAndGet()
-                log("  ✖ Cannot delete $label — ${e.message}", Level.ERROR)
-                event(EventKind.FAILED, label, 0, "can't delete — ${e.message ?: e.javaClass.simpleName}")
-            }
+        } finally {
+            deletingPath = null
         }
     }
 
@@ -850,6 +872,10 @@ class CopyEngine(
                 datesFixed = datesFixed.get(),
                 datesNotKept = datesNotKept.get(),
                 datesUnavailable = datesUnavailable,
+                deletingPath = if (done) null else deletingPath,
+                deletingIsDir = deletingIsDir,
+                deleteDone = deleteDone,
+                deleteTotal = deleteTotal,
                 slots = if (done) emptyList() else slots.mapIndexed { i, s ->
                     SlotState(i, s.name, s.size, s.done.get(), s.retry, s.update)
                 },

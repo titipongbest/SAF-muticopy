@@ -594,6 +594,16 @@ private fun ActivePairProgress(st: CopyState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = cs.onSurfaceVariant,
             )
+        } else if (st.phase == Phase.DELETING && st.deleteTotal > 0) {
+            DeletingRow(st)
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = { (st.deleteDone.toFloat() / st.deleteTotal).coerceIn(0f, 1f) },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = Warn,
+                trackColor = cs.surfaceVariant,
+                strokeCap = StrokeCap.Round,
+            )
         } else {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth().height(8.dp),

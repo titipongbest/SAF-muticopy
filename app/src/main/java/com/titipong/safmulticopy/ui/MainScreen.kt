@@ -666,7 +666,7 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
                     QueueDots(done = st.results, index = st.taskIndex, count = st.taskCount)
                 }
             }
-            if (st.running && st.phase != Phase.COPYING && st.message.isNotBlank()) {
+            if (st.running && st.phase != Phase.COPYING && st.phase != Phase.DELETING && st.message.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     st.message + if (st.phase == Phase.SCANNING) " · ${formatCount(st.scanned)} items" else "",
@@ -678,7 +678,17 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(12.dp))
 
-            if (st.running && st.phase != Phase.COPYING) {
+            if (st.phase == Phase.DELETING && st.deleteTotal > 0) {
+                DeletingRow(st)
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(
+                    progress = { (st.deleteDone.toFloat() / st.deleteTotal).coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth().height(8.dp),
+                    color = accent,
+                    trackColor = cs.surfaceVariant,
+                    strokeCap = StrokeCap.Round,
+                )
+            } else if (st.running && st.phase != Phase.COPYING) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxWidth().height(8.dp),
                     color = accent,

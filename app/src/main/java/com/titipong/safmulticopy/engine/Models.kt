@@ -104,6 +104,11 @@ data class CopyState(
     /** Keep original dates is on but All files access is not allowed. */
     val datesUnavailable: Boolean = false,
     val slots: List<SlotState> = emptyList(),
+    // Mirror: what is being deleted right now (this task)
+    val deletingPath: String? = null,
+    val deletingIsDir: Boolean = false,
+    val deleteDone: Int = 0,
+    val deleteTotal: Int = 0,
     val startedAt: Long = 0,
     val copyStartedAt: Long = 0,
     val finishedAt: Long = 0,

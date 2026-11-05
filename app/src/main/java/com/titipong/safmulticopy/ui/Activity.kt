@@ -350,3 +350,47 @@ private fun EventRow(e: FileEvent) {
         }
     }
 }
+
+/** Mirror: the file or folder being deleted right now, with "N of M". */
+@Composable
+internal fun DeletingRow(st: CopyState) {
+    val path = st.deletingPath ?: return
+    val cs = MaterialTheme.colorScheme
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Warn.copy(alpha = 0.10f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("🗑", fontSize = 16.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    path.substringAfterLast('/'),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val folder = path.substringBeforeLast('/', "")
+                Text(
+                    (if (st.deletingIsDir) "Deleting whole folder" else "Deleting file") +
+                        if (folder.isNotEmpty()) " · in $folder" else "",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = cs.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "${formatCount(st.deleteDone + 1)} / ${formatCount(st.deleteTotal)}",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+                color = Warn,
+            )
+        }
+    }
+}
