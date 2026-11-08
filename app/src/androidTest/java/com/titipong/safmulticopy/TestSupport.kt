@@ -95,7 +95,7 @@ object T {
     /** Saves a screenshot; the CI workflow collects them from the device. */
     fun screenshot(name: String) {
         val bmp = InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot() ?: return
-        val dir = File(ctx.getExternalFilesDir(null), "test-screenshots").apply { mkdirs() }
+        val dir = File(ctx.filesDir, "test-screenshots").apply { mkdirs() } // collected with run-as
         FileOutputStream(File(dir, "api${Build.VERSION.SDK_INT}-$name.png")).use {
             bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
         }

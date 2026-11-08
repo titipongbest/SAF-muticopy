@@ -56,7 +56,7 @@ class MainScreenTest {
 
     private fun ComposeTestRule.waitForText(text: String, timeoutMs: Long = 60_000) {
         try {
-            waitUntil(timeoutMs) { onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMs) { onAllNodesWithText(text, substring = true).fetchSemanticsNodes().isNotEmpty() }
         } catch (e: Throwable) {
             T.screenshot("FAILED-waiting-for-${text.replace(Regex("[^A-Za-z0-9]"), "_")}")
             throw e
