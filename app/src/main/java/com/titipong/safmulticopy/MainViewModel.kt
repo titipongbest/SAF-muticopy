@@ -98,11 +98,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshGrants()
         // Only restore what we still have permission for (the user may have revoked it).
         val granted = grants.read
-        settings.sources.map(Uri::parse).filter { it in granted }.forEach { sources += describe(it) }
-        settings.files.map(Uri::parse).filter { it in granted }.forEach { uri ->
+        settings.sources.map(Uri::parse).filter { it in granted || isOwn(it) }.forEach { sources += describe(it) }
+        settings.files.map(Uri::parse).filter { it in granted || isOwn(it) }.forEach { uri ->
             describeFile(uri)?.let { files += it }
         }
-        settings.destination?.let(Uri::parse)?.takeIf { it in granted }?.let { destination = describe(it) }
+        settings.destination?.let(Uri::parse)?.takeIf { it in granted || isOwn(it) }?.let { destination = describe(it) }
     }
 
     fun selectTab(i: Int) {
@@ -259,7 +259,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------ folder pairs
 
-    fun canAccess(p: FolderPair): Boolean = p.sourceUri in grants.read && p.destUri in grants.write
+    fun canAccess(p: FolderPair): Boolean =
+        (p.sourceUri in grants.read || isOwn(p.sourceUri)) && (p.destUri in grants.write || isOwn(p.destUri))
+
+    /**
+     * Folders from this app's own document provider need no granted permission. Only debug builds
+     * have one (used by the automated tests); release builds have none, so this is always false there.
+     */
+    private fun isOwn(uri: Uri): Boolean = uri.authority == "${getApplication<Application>().packageName}.testdocs"
 
     fun draftOf(p: FolderPair) = PairDraft(
         id = p.id,

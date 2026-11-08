@@ -184,28 +184,10 @@ class CopyEngine(
     )
 
     private fun needsDateFix(srcMtime: Long, destMtime: Long) =
-        canSetDates && srcMtime > 0 && destMtime > 0 && !sameTime(srcMtime, destMtime)
+        canSetDates && FileCompare.needsDateFix(srcMtime, destMtime)
 
-    /**
-     * Same moment? Allows FAT's 2-second steps, and a shift of exactly the time-zone offset
-     * (± 1 h for daylight saving): FAT/exFAT drives store local time, so some phones read a copy's
-     * date back shifted by e.g. 7 hours. Without this, every file would be copied again each time.
-     */
-    private fun sameTime(a: Long, b: Long): Boolean {
-        val d = kotlin.math.abs(a - b)
-        if (d <= MTIME_TOLERANCE_MS) return true
-        val tz = kotlin.math.abs(java.util.TimeZone.getDefault().getOffset(a).toLong())
-        return listOf(tz, tz + HOUR_MS, tz - HOUR_MS, HOUR_MS)
-            .any { it > 0 && kotlin.math.abs(d - it) <= MTIME_TOLERANCE_MS }
-    }
-
-    /** Null when the existing copy is the same; otherwise why it has to be copied again. */
-    private fun changeReason(src: FileRec, destSize: Long, destMtime: Long): String? = when {
-        destSize != src.size -> "size changed (${formatSize(destSize)} → ${formatSize(src.size)})"
-        src.mtime > destMtime + MTIME_TOLERANCE_MS && !sameTime(src.mtime, destMtime) ->
-            "source is newer by ${formatDuration(src.mtime - destMtime)}"
-        else -> null
-    }
+    private fun changeReason(src: FileRec, destSize: Long, destMtime: Long): String? =
+        FileCompare.changeReason(src.size, src.mtime, destSize, destMtime)
 
     suspend fun run() = coroutineScope {
         openLog()
@@ -972,7 +954,5 @@ class CopyEngine(
         private const val BUFFER_SIZE = 256 * 1024
         private const val MAX_EVENTS = 60
         private const val SCAN_BATCH = 500
-        private const val MTIME_TOLERANCE_MS = 2_000L // FAT stores time in 2-second steps
-        private const val HOUR_MS = 3_600_000L
     }
 }
