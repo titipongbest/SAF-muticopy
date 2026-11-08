@@ -51,11 +51,6 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/release.jks"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SAF-MultiCopy
-          path: SAF-MultiCopy.apk
-
       # Download link that always points to the newest build:
       # https://github.com/<owner>/<repo>/releases/download/latest/SAF-MultiCopy.apk
       - name: Publish "latest" release
