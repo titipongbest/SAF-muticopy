@@ -36,7 +36,6 @@ class MainScreenTest {
     private var scenario: ActivityScenario<MainActivity>? = null
 
     @Before fun clean() {
-        T.allFilesAccess(false)
         CopyManager.reset()
         val store = PairStore.get(T.ctx)
         store.pairs.value.forEach { store.delete(it.id) }
@@ -152,6 +151,7 @@ class MainScreenTest {
             putBoolean("keepDates", true)
         }
 
+        assertFalse("run without All files access", T.hasAllFilesAccess())
         launch()
         compose.onNodeWithText("Music").assertExists()
         shot("07-quick-ready")

@@ -10,7 +10,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -27,8 +26,6 @@ import kotlin.math.abs
  */
 @RunWith(AndroidJUnit4::class)
 class CopyEngineTest {
-
-    @After fun resetAccess() = T.allFilesAccess(false)
 
     private fun photos(root: File): File {
         val src = File(root, "Photos").apply { mkdirs() }
@@ -355,8 +352,9 @@ class CopyEngineTest {
         assertTrue(updated.detail!!, updated.detail!!.startsWith("source is newer"))
     }
 
+    @NeedsAllFilesAccess
     @Test fun keepDates_withAllFilesAccess_copiesGetOriginalDate_andOldCopiesAreFixed() {
-        T.allFilesAccess(true)
+        assertTrue("run with All files access", T.hasAllFilesAccess())
         val base = T.dir("dates1")
         val src = File(base, "D").apply { mkdirs() }
         val t0 = (System.currentTimeMillis() - 30 * 86_400_000L) / 1000 * 1000
@@ -381,7 +379,7 @@ class CopyEngineTest {
     }
 
     @Test fun keepDates_withoutAccess_isReported() {
-        T.allFilesAccess(false)
+        assertFalse("run without All files access", T.hasAllFilesAccess())
         val base = T.dir("dates2")
         val src = File(base, "D").apply { mkdirs() }
         T.write(src, "a.jpg", "a", System.currentTimeMillis() - 86_400_000L)
@@ -395,8 +393,9 @@ class CopyEngineTest {
 
     // ---------------------------------------------------------------- USB fallback
 
+    @NeedsAllFilesAccess
     @Test fun storageServiceFailure_fallsBackToDirectWrite_andNextSyncSkips() {
-        T.allFilesAccess(true)
+        assertTrue("run with All files access", T.hasAllFilesAccess())
         val base = T.dir("usb1")
         val src = File(base, "broken-usb").apply { mkdirs() } // provider refuses files inside it
         T.write(src, "e-1.bin", "one")
@@ -416,7 +415,7 @@ class CopyEngineTest {
     }
 
     @Test fun storageServiceFailure_withoutAccess_isReportedAsFailed() {
-        T.allFilesAccess(false)
+        assertFalse("run without All files access", T.hasAllFilesAccess())
         val base = T.dir("usb2")
         val src = File(base, "broken-usb").apply { mkdirs() }
         T.write(src, "e-1.bin", "one")

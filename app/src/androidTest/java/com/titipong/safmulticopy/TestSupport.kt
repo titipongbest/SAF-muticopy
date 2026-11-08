@@ -89,16 +89,8 @@ object T {
         return ParcelFileDescriptorReader.read(pfd)
     }
 
-    /** "All files access" on/off (Android 11+). Needed for keep-original-dates and the USB fallback. */
-    fun allFilesAccess(on: Boolean) {
-        if (Build.VERSION.SDK_INT >= 30) {
-            shell("appops set $pkg MANAGE_EXTERNAL_STORAGE ${if (on) "allow" else "default"}")
-        } else {
-            val verb = if (on) "grant" else "revoke"
-            shell("pm $verb $pkg android.permission.WRITE_EXTERNAL_STORAGE")
-        }
-        Thread.sleep(300)
-    }
+    /** Whether "All files access" is on (set by the CI script between test passes). */
+    fun hasAllFilesAccess(): Boolean = com.titipong.safmulticopy.util.FileDates.hasAccess(ctx)
 
     /** Saves a screenshot; the CI workflow collects them from the device. */
     fun screenshot(name: String) {
