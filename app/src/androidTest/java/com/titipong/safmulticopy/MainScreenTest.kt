@@ -2,6 +2,7 @@ package com.titipong.safmulticopy
 
 import android.content.Context
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasScrollToNodeAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.ComposeTestRule
@@ -94,7 +95,8 @@ class MainScreenTest {
         }
         shot("02-quick-copy-empty")
 
-        compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("Exclude files or folders"))
+        // scroll past it, so the row isn't hidden behind the bottom buttons
+        compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("Settings"))
         compose.onNodeWithText("Exclude files or folders").performClick()
         compose.waitForText("Separate with ;", 5_000)
         shot("03-excludes-open")
@@ -118,6 +120,7 @@ class MainScreenTest {
 
         compose.onNodeWithText("Sync all (2)").performClick()
         compose.waitForText("All pairs synced")
+        compose.onNodeWithText("All pairs synced").assertIsDisplayed() // progress card scrolled into view
         shot("05-pairs-synced")
 
         assertEquals(T.contents(s1), T.contents(d1))
@@ -126,6 +129,7 @@ class MainScreenTest {
         compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("New folder pair"))
         compose.onAllNodesWithText("Pair A").onLast().performClick()
         compose.waitForText("From this run", 10_000)
+        Thread.sleep(1_500) // let the sheet slide up before the screenshot
         compose.onAllNodesWithText("IMG_", substring = true).fetchSemanticsNodes().let {
             assertFalse("pair A shows its own files", it.isEmpty())
         }

@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -211,6 +212,16 @@ fun MainScreen(vm: MainViewModel) {
 
     val selectedPairs = pairs.filter { it.selected }
 
+    // When a copy/sync starts, bring its progress card into view. It is added above the pair list
+    // (or below Copy from / Destination), so without this it can appear off-screen.
+    val listState = rememberLazyListState()
+    LaunchedEffect(st.startedAt) {
+        if (st.startedAt > 0 && st.running) {
+            val onMyTab = if (vm.tab == TAB_PAIRS) st.isPairRun else !st.isPairRun
+            if (onMyTab) listState.animateScrollToItem(if (vm.tab == TAB_PAIRS) 0 else 2)
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -270,6 +281,7 @@ fun MainScreen(vm: MainViewModel) {
         },
     ) { pad ->
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = 16.dp,
