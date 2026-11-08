@@ -3,6 +3,7 @@ package com.titipong.safmulticopy
 import android.content.Context
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasScrollToKeyAction
 import androidx.compose.ui.test.hasScrollToNodeAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.ComposeTestRule
@@ -11,6 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToKey
 import androidx.compose.ui.test.performScrollToNode
 import androidx.core.content.edit
 import androidx.test.core.app.ActivityScenario
@@ -126,7 +128,7 @@ class MainScreenTest {
         assertEquals(T.contents(s1), T.contents(d1))
         assertEquals(T.contents(s2), T.contents(d2))
 
-        compose.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("New folder pair"))
+        compose.onNode(hasScrollToKeyAction()).performScrollToKey("pair-A") // the card, not the result row
         compose.onAllNodesWithText("Pair A").onLast().performClick()
         compose.waitForText("From this run", 10_000)
         Thread.sleep(1_500) // let the sheet slide up before the screenshot
