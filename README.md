@@ -85,7 +85,7 @@ SAF เพียงอย่างเดียวตั้งวันที่�
 
 ## การทดสอบอัตโนมัติ
 
-ทุกครั้งที่ push ขึ้น `main` workflow **Device tests** จะ:
+workflow **Device tests** รันเมื่อสั่งเองเท่านั้น (Actions → Device tests → Run workflow) โดยจะ:
 
 - รัน unit tests (ตรรกะการเทียบไฟล์, exclude, path, การสรุปผล) บน JVM
 - เปิด Android emulator **Android 11 (API 30)** และ **Android 14 (API 34)** แล้วรัน

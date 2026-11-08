@@ -4,9 +4,8 @@ name: Device tests
 # emulators. Results, screenshots and logs are published as a pre-release per API level:
 # https://github.com/<owner>/<repo>/releases/tag/test-results-api34
 
+# Runs only when started by hand: Actions → Device tests → Run workflow.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
