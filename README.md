@@ -83,6 +83,20 @@ SAF เพียงอย่างเดียวตั้งวันที่�
 - เทียบไฟล์ต้นทาง/ปลายทางใน memory ครั้งเดียว
 - ก๊อปหลายไฟล์พร้อมกันด้วย coroutines และ buffer 256 KB
 
+## การทดสอบอัตโนมัติ
+
+ทุกครั้งที่ push ขึ้น `main` workflow **Device tests** จะ:
+
+- รัน unit tests (ตรรกะการเทียบไฟล์, exclude, path, การสรุปผล) บน JVM
+- เปิด Android emulator **Android 11 (API 30)** และ **Android 14 (API 34)** แล้วรัน
+  - `CopyEngineTest` — ก๊อปจริงผ่าน SAF แล้วตรวจไฟล์ปลายทางจริง: Quick copy, ข้ามไฟล์เดิม, อัปเดตพร้อมเหตุผล,
+    Merge/Mirror/Preview, Exclude, ไฟล์ที่เลือก, Folder pair, คิวหลายคู่ (คู่ที่ล้มเหลวไม่ลบปลายทาง), 300 ไฟล์แบบขนาน,
+    Stop, เวลาเพี้ยนตามโซนเวลา, เก็บวันที่เดิม, ทางสำรองเมื่อ USB สร้างไฟล์ไม่ได้
+  - `MainScreenTest` — กดหน้าจอจริงแบบผู้ใช้ พร้อมเก็บภาพหน้าจอทุกขั้น
+- ผลลัพธ์ ภาพหน้าจอ และ log อยู่ที่ Releases → `test-results-api30` / `test-results-api34`
+
+แอป debug มี document provider สำหรับทดสอบ (แทนหน้าเลือกโฟลเดอร์ของระบบ) — ไม่มีใน release build
+
 ## Signing (release key)
 
 APK ทุกตัวเซ็นด้วย release key ส่วนตัว (`CN=NorthXbar`) ซึ่ง **ไม่ได้อยู่ใน repo**
