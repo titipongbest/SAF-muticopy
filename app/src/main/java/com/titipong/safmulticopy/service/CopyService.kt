@@ -58,12 +58,22 @@ class CopyService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        val runId = CopyManager.currentRunId()
         working = true
         acquireWakeLock()
         scope.launch {
-            while (job.isActive) {
+            var cancelledAt = 0L
+            while (!job.isCompleted) {
+                if (job.isCancelled) {
+                    if (cancelledAt == 0L) cancelledAt = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - cancelledAt >= STOP_FORCE_MS) {
+                        CopyManager.forceCancelIfStuck(runId)
+                        finish()
+                        break
+                    }
+                }
                 notificationManager().notify(PROGRESS_ID, progressNotification(CopyManager.state.value))
-                delay(1000)
+                delay(if (job.isCancelled) 500L else 1000L)
             }
         }
         job.invokeOnCompletion { scope.launch { finish() } }
@@ -82,6 +92,7 @@ class CopyService : Service() {
     }
 
     private fun finish() {
+        if (!working) return
         releaseWakeLock()
         working = false
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
@@ -130,12 +141,13 @@ class CopyService : Service() {
 
     private fun progressNotification(s: CopyState): Notification {
         val pct = if (s.bytesToCopy > 0) (s.bytesDone * 100 / s.bytesToCopy).toInt().coerceIn(0, 100) else 0
-        val copying = s.phase == Phase.COPYING
-        val title = when (s.phase) {
-            Phase.SCANNING -> "Scanning folders…"
-            Phase.DELETING -> "Removing extra files…"
-            Phase.PREPARING -> "Creating folders…"
-            Phase.COPYING -> if (s.dryRun) "Preview…" else "Copying · $pct%"
+        val copying = s.phase == Phase.COPYING && !s.stopping
+        val title = when {
+            s.stopping -> "Stopping…"
+            s.phase == Phase.SCANNING -> "Scanning folders…"
+            s.phase == Phase.DELETING -> "Removing extra files…"
+            s.phase == Phase.PREPARING -> "Creating folders…"
+            s.phase == Phase.COPYING -> if (s.dryRun) "Preview…" else "Copying · $pct%"
             else -> "SAF MultiCopy"
         }
         val text = if (copying) {
@@ -145,7 +157,7 @@ class CopyService : Service() {
             s.message
         }
         val queuePrefix = if (s.isQueue) "${s.taskIndex + 1}/${s.taskCount} ${s.taskLabel} · " else ""
-        return NotificationCompat.Builder(this, CH_PROGRESS)
+        val builder = NotificationCompat.Builder(this, CH_PROGRESS)
             .setSmallIcon(R.drawable.ic_stat_copy)
             .setContentTitle(queuePrefix + title)
             .setContentText(text)
@@ -154,9 +166,9 @@ class CopyService : Service() {
             .setSilent(true)
             .setContentIntent(openAppIntent())
             .setProgress(100, pct, !copying)
-            .addAction(0, "Stop", stopIntent())
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .build()
+        if (!s.stopping) builder.addAction(0, "Stop", stopIntent())
+        return builder.build()
     }
 
     private fun doneNotification(s: CopyState): Notification {
@@ -185,5 +197,6 @@ class CopyService : Service() {
         private const val CH_DONE = "done"
         private const val PROGRESS_ID = 1
         private const val DONE_ID = 2
+        private const val STOP_FORCE_MS = 5_000L
     }
 }

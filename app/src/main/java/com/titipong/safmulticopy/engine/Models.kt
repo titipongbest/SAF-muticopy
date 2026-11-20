@@ -84,6 +84,7 @@ data class TaskResult(
 
 data class CopyState(
     val phase: Phase = Phase.IDLE,
+    val stopping: Boolean = false,
     val dryRun: Boolean = false,
     val message: String = "",
     // Progress of the task that is running now (totals of all tasks once finished).

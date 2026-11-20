@@ -254,7 +254,7 @@ fun MainScreen(vm: MainViewModel) {
         },
         bottomBar = {
             if (running) {
-                BottomActions(running = true, primaryLabel = "", primaryEnabled = false, onPreview = {}, onPrimary = {}, onStop = vm::stop)
+                BottomActions(running = true, stopping = st.stopping, primaryLabel = "", primaryEnabled = false, onPreview = {}, onPrimary = {}, onStop = vm::stop)
             } else if (vm.tab == TAB_PAIRS) {
                 if (pairs.isNotEmpty()) {
                     BottomActions(
@@ -619,7 +619,9 @@ private fun ProgressCard(st: CopyState, onDismiss: () -> Unit) {
     val now = if (st.finishedAt > 0) st.finishedAt else System.currentTimeMillis()
     val hasErrors = st.hasErrors
     val queue = st.isQueue
-    val (title, accent) = when (st.phase) {
+    val (title, accent) = if (st.stopping) {
+        "Stopping…" to cs.error
+    } else when (st.phase) {
         Phase.SCANNING -> "Scanning folders…" to cs.primary
         Phase.DELETING -> "Removing extra files…" to Warn
         Phase.PREPARING -> "Creating folders…" to cs.primary
@@ -864,6 +866,7 @@ private fun BottomActions(
     onPrimary: () -> Unit,
     onStop: () -> Unit,
     primaryIsSync: Boolean = false,
+    stopping: Boolean = false,
 ) {
     Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 12.dp) {
         Row(
@@ -876,10 +879,11 @@ private fun BottomActions(
             if (running) {
                 Button(
                     onClick = onStop,
+                    enabled = !stopping,
                     modifier = Modifier.fillMaxWidth().height(54.dp),
                     shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) { Text("Stop", style = MaterialTheme.typography.titleMedium) }
+                ) { Text(if (stopping) "Stopping…" else "Stop", style = MaterialTheme.typography.titleMedium) }
             } else {
                 OutlinedButton(
                     onClick = onPreview,

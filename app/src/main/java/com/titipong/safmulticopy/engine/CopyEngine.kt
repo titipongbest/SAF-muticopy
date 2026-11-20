@@ -11,7 +11,9 @@ import com.titipong.safmulticopy.util.formatDuration
 import com.titipong.safmulticopy.util.formatSize
 import com.titipong.safmulticopy.util.resultSummary
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -19,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileNotFoundException
@@ -30,6 +33,7 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -170,7 +174,16 @@ class CopyEngine(
     )
 
     /** Something in the destination that mirror removes (a whole folder, or a file). */
-    private class Deletion(val rel: String, val docId: String, val isDir: Boolean)
+    private class Deletion(
+        val rel: String,
+        val docId: String,
+        val isDir: Boolean,
+        /** For [isDir] = true: nested files then deepest-first sub-folders so SAF doesn't do one huge recursive IPC. */
+        val childrenBottomUp: List<String> = emptyList(),
+    )
+
+    /** Thrown when a blocking storage/SAF call exceeds its timeout so we stop hammering a wedged drive. */
+    private class StorageStalledException(message: String) : IOException(message)
 
     /** An existing, unchanged copy whose date is wrong (e.g. copied before dates were kept). */
     private class DateFix(val docId: String, val mtime: Long, val label: String, val size: Long)
@@ -550,15 +563,37 @@ class CopyEngine(
 
     private fun label(target: Target, rel: String) = if (target.name.isEmpty()) rel else "${target.name}/$rel"
 
-    /** Destination items that are not in the source. Folders are deleted as a whole. */
+    /** Destination items that are not in the source. Folders are deleted bottom-up as a whole. */
     private fun extras(src: ScanResult, dest: ScanResult): List<Deletion> {
         val out = ArrayList<Deletion>()
         val removedDirs = HashSet<String>()
-        for (d in dest.dirs.values.sortedBy { rel -> rel.rel.count { it == '/' } }) {
+        val removedDirList = ArrayList<Pair<String, DirRec>>()
+        for (d in dest.dirs.values.sortedBy { it.rel.count { c -> c == '/' } }) {
             val k = d.rel.lowercase()
             if (k in src.dirs || Saf.underAny(k, removedDirs)) continue
             removedDirs += k
-            out += Deletion(d.rel, d.docId, isDir = true)
+            removedDirList += k to d
+        }
+        val nestedFiles = HashMap<String, ArrayList<String>>()
+        val nestedDirs = HashMap<String, ArrayList<DirRec>>()
+        if (removedDirs.isNotEmpty()) {
+            for ((k, d) in dest.dirs) {
+                if (k in removedDirs) continue
+                val root = ancestorIn(k, removedDirs) ?: continue
+                nestedDirs.getOrPut(root) { ArrayList() } += d
+            }
+            for ((k, f) in dest.files) {
+                val root = ancestorIn(k, removedDirs) ?: continue
+                nestedFiles.getOrPut(root) { ArrayList() } += f.docId
+            }
+        }
+        for ((k, d) in removedDirList) {
+            val children = ArrayList<String>()
+            nestedFiles[k]?.let { children.addAll(it) }
+            nestedDirs[k]
+                ?.sortedByDescending { it.rel.count { c -> c == '/' } }
+                ?.forEach { children += it.docId }
+            out += Deletion(d.rel, d.docId, isDir = true, childrenBottomUp = children)
         }
         for (f in dest.files.values) {
             val k = f.rel.lowercase()
@@ -568,12 +603,59 @@ class CopyEngine(
         return out
     }
 
+    private fun ancestorIn(key: String, set: Set<String>): String? {
+        if (set.isEmpty()) return null
+        var p = key
+        while (true) {
+            val i = p.lastIndexOf('/')
+            if (i < 0) return null
+            p = p.substring(0, i)
+            if (p in set) return p
+        }
+    }
+
+    /**
+     * Runs blocking storage/SAF delete calls on a single reusable daemon thread with a timeout.
+     * On cancellation (user taps Stop) or timeout, awaiting unblocks immediately instead of wedging
+     * the engine, UI, and foreground service in a hung Binder/FUSE call.
+     */
+    private class DeleteRunner {
+        private val exec = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "saf-delete").apply { isDaemon = true }
+        }
+        @Volatile private var stalled = false
+
+        suspend fun <T> run(itemLabel: String, block: () -> T): T {
+            if (stalled) throw StorageStalledException("storage stopped responding")
+            currentCoroutineContext().ensureActive()
+            val deferred = CompletableDeferred<Result<T>>()
+            exec.execute { deferred.complete(runCatching(block)) }
+            val result = try {
+                withTimeout(DELETE_TIMEOUT_MS) { deferred.await() }
+            } catch (e: TimeoutCancellationException) {
+                stalled = true
+                throw StorageStalledException(
+                    "storage stopped responding while deleting $itemLabel (timed out after ${DELETE_TIMEOUT_MS / 1000}s) — drive may be busy or disconnected",
+                )
+            }
+            return result.getOrThrow()
+        }
+
+        fun close() {
+            exec.shutdownNow()
+        }
+    }
+
     private suspend fun deleteExtras(plans: List<Plan>, destTree: Uri) {
         if (plans.none { it.deletions.isNotEmpty() }) return
         phase = Phase.DELETING
         message = "Removing extra files…"
         deleteTotal = plans.sumOf { it.deletions.size }
         deleteDone = 0
+        val runner = if (req.dryRun) null else DeleteRunner()
+        var directDeletes = 0
+        var directFailures = 0
+        var directBlocked = false
         try {
             for (p in plans) for (del in p.deletions) {
                 currentCoroutineContext().ensureActive()
@@ -588,12 +670,32 @@ class CopyEngine(
                     event(EventKind.WOULD_DELETE, label, 0, if (del.isDir) "whole folder" else null)
                 } else {
                     try {
-                        DocumentsContract.deleteDocument(cr, Saf.docUri(destTree, del.docId))
+                        val r = runner!!
+                        var doneDirect = false
+                        if (hasAllFilesAccess && !directBlocked) {
+                            val f = FileDates.fileFor(Saf.docUri(destTree, del.docId))
+                            if (f != null) {
+                                doneDirect = deleteDirect(f, del.isDir, label, r)
+                                if (doneDirect) {
+                                    directDeletes++
+                                } else {
+                                    directFailures++
+                                    if (directDeletes == 0 && directFailures >= 3) directBlocked = true
+                                }
+                            }
+                        }
+                        if (!doneDirect) deleteViaSaf(del, destTree, label, r)
                         deleted.incrementAndGet()
                         log("  − Deleted $what: $label", Level.WARN)
                         event(EventKind.DELETED, label, 0, if (del.isDir) "whole folder" else null)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: StorageStalledException) {
+                        failed.incrementAndGet()
+                        log("  ✖ ${e.message}", Level.ERROR)
+                        event(EventKind.FAILED, label, 0, e.message)
+                        throw e
                     } catch (e: Exception) {
-                        if (e is CancellationException) throw e
                         failed.incrementAndGet()
                         log("  ✖ Cannot delete $label — ${e.message}", Level.ERROR)
                         event(EventKind.FAILED, label, 0, "can't delete — ${e.message ?: e.javaClass.simpleName}")
@@ -603,7 +705,69 @@ class CopyEngine(
             }
         } finally {
             deletingPath = null
+            runner?.close()
         }
+    }
+
+    /**
+     * Deletes a file or folder directly via POSIX File API (avoids hammering ExternalStorageProvider
+     * and MediaProvider per-file on USB OTG drives). Returns false if direct deletion isn't permitted,
+     * so the caller can fall back to SAF.
+     */
+    private suspend fun deleteDirect(file: File, isDir: Boolean, label: String, runner: DeleteRunner): Boolean {
+        if (!isDir) {
+            val ok = runner.run(label) { !file.exists() || file.delete() || !file.exists() }
+            if (ok) toScan += file.path
+            return ok
+        }
+        val stack = ArrayDeque<Pair<File, Boolean>>()
+        stack.addLast(file to false)
+        while (stack.isNotEmpty()) {
+            currentCoroutineContext().ensureActive()
+            val (cur, visited) = stack.removeLast()
+            if (!visited) {
+                stack.addLast(cur to true)
+                val entries = runner.run(label) {
+                    cur.listFiles()?.map { it to it.isDirectory }
+                }
+                if (entries != null) {
+                    for ((child, childIsDir) in entries) {
+                        if (childIsDir) {
+                            stack.addLast(child to false)
+                        } else {
+                            currentCoroutineContext().ensureActive()
+                            val ok = runner.run("$label/${child.name}") {
+                                !child.exists() || child.delete() || !child.exists()
+                            }
+                            if (!ok) return false
+                            toScan += child.path
+                        }
+                    }
+                }
+            } else {
+                val ok = runner.run(label) { !cur.exists() || cur.delete() || !cur.exists() }
+                if (!ok) return false
+            }
+        }
+        return true
+    }
+
+    /** Deletes via SAF bottom-up so large folders aren't removed in a single uninterruptible IPC call. */
+    private suspend fun deleteViaSaf(del: Deletion, destTree: Uri, label: String, runner: DeleteRunner) {
+        if (del.isDir) {
+            for (childId in del.childrenBottomUp) {
+                currentCoroutineContext().ensureActive()
+                val childUri = Saf.docUri(destTree, childId)
+                try {
+                    runner.run(label) { DocumentsContract.deleteDocument(cr, childUri) }
+                } catch (_: FileNotFoundException) {
+                    // Already removed (e.g. by partial direct delete)
+                }
+            }
+        }
+        val uri = Saf.docUri(destTree, del.docId)
+        val ok = runner.run(label) { DocumentsContract.deleteDocument(cr, uri) }
+        if (!ok) throw IOException("storage provider refused to delete")
     }
 
     private suspend fun createFolders(p: Plan, destTree: Uri, destRootId: String) {
@@ -954,5 +1118,6 @@ class CopyEngine(
         private const val BUFFER_SIZE = 256 * 1024
         private const val MAX_EVENTS = 60
         private const val SCAN_BATCH = 500
+        private const val DELETE_TIMEOUT_MS = 20_000L
     }
 }

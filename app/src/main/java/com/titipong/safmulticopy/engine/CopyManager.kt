@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 /** Shared between the UI and the foreground service (same process). */
 object CopyManager {
@@ -21,6 +22,7 @@ object CopyManager {
 
     @Volatile private var pending: CopyRequest? = null
     @Volatile private var job: Job? = null
+    private val activeRunId = AtomicLong(0L)
 
     fun start(context: Context, req: CopyRequest) {
         if (_state.value.running || req.tasks.isEmpty()) return
@@ -40,6 +42,10 @@ object CopyManager {
     }
 
     fun stop() {
+        val s = _state.value
+        if (s.running && !s.stopping) {
+            _state.value = s.copy(stopping = true, message = "Stopping…")
+        }
         job?.cancel()
     }
 
@@ -47,12 +53,31 @@ object CopyManager {
         if (!_state.value.running) _state.value = CopyState()
     }
 
+    internal fun currentRunId(): Long = activeRunId.get()
+
+    /** Last-resort recovery if a cancelled job is wedged in an uninterruptible storage/Binder call. */
+    internal fun forceCancelIfStuck(runId: Long) {
+        if (!activeRunId.compareAndSet(runId, runId + 1)) return
+        val s = _state.value
+        if (!s.running) return
+        _state.value = s.copy(
+            phase = Phase.CANCELLED,
+            stopping = false,
+            message = "Stopped (storage stopped responding)",
+            deletingPath = null,
+            slots = emptyList(),
+            finishedAt = System.currentTimeMillis(),
+        )
+    }
+
     /** Called by the service once it is in the foreground. */
     internal fun launchPending(scope: CoroutineScope, context: Context): Job? {
         val req = pending ?: return null
         pending = null
+        val runId = activeRunId.incrementAndGet()
         val j = scope.launch(Dispatchers.IO) {
-            CopyEngine(context, req) { _state.value = it }.run()
+            CopyEngine(context, req) { if (activeRunId.get() == runId) _state.value = it }.run()
+            if (activeRunId.get() != runId) return@launch
             // Remember the outcome on each folder pair (not for previews).
             if (!req.dryRun) {
                 val s = _state.value

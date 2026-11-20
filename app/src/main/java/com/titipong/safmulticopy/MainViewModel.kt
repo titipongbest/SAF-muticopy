@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
 import com.titipong.safmulticopy.data.FolderPair
 import com.titipong.safmulticopy.data.PairRecent
 import com.titipong.safmulticopy.data.PairStore
@@ -21,7 +22,10 @@ import com.titipong.safmulticopy.engine.CopyTask
 import com.titipong.safmulticopy.engine.GlobSet
 import com.titipong.safmulticopy.engine.Saf
 import com.titipong.safmulticopy.util.FileDates
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 data class FolderRef(
@@ -98,11 +102,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshGrants()
         // Only restore what we still have permission for (the user may have revoked it).
         val granted = grants.read
-        settings.sources.map(Uri::parse).filter { it in granted || isOwn(it) }.forEach { sources += describe(it) }
-        settings.files.map(Uri::parse).filter { it in granted || isOwn(it) }.forEach { uri ->
-            describeFile(uri)?.let { files += it }
+        val restoredSources = settings.sources.map(Uri::parse).filter { it in granted || isOwn(it) }
+        val restoredFiles = settings.files.map(Uri::parse).filter { it in granted || isOwn(it) }
+        val restoredDest = settings.destination?.let(Uri::parse)?.takeIf { it in granted || isOwn(it) }
+
+        // Populate immediately using URI strings (zero IPC) so slow/stalled OTG never freezes startup.
+        restoredSources.forEach { sources += describeFast(it) }
+        restoredDest?.let { destination = describeFast(it) }
+
+        if (restoredSources.isNotEmpty() || restoredFiles.isNotEmpty() || restoredDest != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                val resolvedSources = restoredSources.associateWith { Saf.displayName(cr, it) }
+                val resolvedDest = restoredDest?.let { Saf.displayName(cr, it) }
+                val resolvedFiles = restoredFiles.mapNotNull { describeFile(it) }
+                withContext(Dispatchers.Main) {
+                    resolvedSources.forEach { (uri, name) ->
+                        if (name == null) return@forEach
+                        val idx = sources.indexOfFirst { it.uri == uri }
+                        if (idx >= 0 && sources[idx].name != name) sources[idx] = sources[idx].copy(name = name)
+                    }
+                    if (resolvedDest != null && destination?.uri == restoredDest && destination?.name != resolvedDest) {
+                        destination = destination?.copy(name = resolvedDest)
+                    }
+                    resolvedFiles.forEach { ref ->
+                        if (files.none { it.uri == ref.uri }) files += ref
+                    }
+                }
+            }
         }
-        settings.destination?.let(Uri::parse)?.takeIf { it in granted || isOwn(it) }?.let { destination = describe(it) }
     }
 
     fun selectTab(i: Int) {
@@ -425,6 +452,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun describe(uri: Uri) = FolderRef(
         uri = uri,
         name = Saf.displayName(cr, uri) ?: Saf.fallbackName(uri),
+        location = Saf.locationLabel(uri),
+    )
+
+    private fun describeFast(uri: Uri) = FolderRef(
+        uri = uri,
+        name = Saf.fallbackName(uri),
         location = Saf.locationLabel(uri),
     )
 }
