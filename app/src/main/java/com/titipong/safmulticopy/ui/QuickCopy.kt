@@ -1,11 +1,11 @@
+@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.titipong.safmulticopy.ui
 
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.clickable
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,33 +13,54 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.titipong.safmulticopy.FolderPickerState
 import com.titipong.safmulticopy.FolderRef
 import com.titipong.safmulticopy.MainViewModel
+import com.titipong.safmulticopy.ui.theme.Success
 import com.titipong.safmulticopy.util.formatCount
 import com.titipong.safmulticopy.util.formatSize
 
+private const val FOLDERS_PREVIEW = 6
 private const val FILES_PREVIEW = 5
 
 @Composable
@@ -50,12 +71,14 @@ internal fun SourcesCard(
     onAddFolder: () -> Unit,
     onAddFiles: () -> Unit,
     onRemoveFolder: (FolderRef) -> Unit,
+    onClearFolders: () -> Unit,
     onRemoveFile: (FolderRef) -> Unit,
     onClearFiles: () -> Unit,
 ) {
+    var showAllFolders by remember { mutableStateOf(false) }
     var showAllFiles by remember { mutableStateOf(false) }
     val summary = listOfNotNull(
-        folders.size.takeIf { it > 0 }?.let { "$it folder${if (it > 1) "s" else ""}" },
+        folders.size.takeIf { it > 0 }?.let { "${formatCount(it)} folder${if (it > 1) "s" else ""}" },
         files.size.takeIf { it > 0 }?.let {
             "${formatCount(it)} file${if (it > 1) "s" else ""} (${formatSize(files.sumOf { f -> f.size })})"
         },
@@ -66,8 +89,24 @@ internal fun SourcesCard(
         subtitle = summary.ifEmpty { "Folders or files — internal storage, SD card or USB OTG" },
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            folders.forEach { ref ->
+            val visibleFolders = if (showAllFolders) folders else folders.take(FOLDERS_PREVIEW)
+            visibleFolders.forEach { ref ->
                 FolderRow(ref, "📁", if (enabled) ({ onRemoveFolder(ref) }) else null)
+            }
+            if (folders.size > FOLDERS_PREVIEW || (folders.size > 1 && enabled)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (folders.size > FOLDERS_PREVIEW) {
+                        TextButton(onClick = { showAllFolders = !showAllFolders }) {
+                            Text(if (showAllFolders) "Show less" else "Show all ${formatCount(folders.size)} folders")
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (enabled && folders.size > 1) {
+                        TextButton(onClick = onClearFolders) {
+                            Text("Remove all folders", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
             }
 
             val visible = if (showAllFiles) files else files.take(FILES_PREVIEW)
@@ -100,7 +139,7 @@ internal fun SourcesCard(
                 ) {
                     Icon(Icons.Filled.Add, null, Modifier.size(20.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Folder")
+                    Text("Folders")
                 }
                 FilledTonalButton(
                     onClick = onAddFiles,
@@ -114,9 +153,9 @@ internal fun SourcesCard(
                     Text("Files")
                 }
             }
-            if (files.isEmpty() && enabled) {
+            if (enabled) {
                 Text(
-                    "Files: long-press to select several at once",
+                    "Folders: pick a parent folder to select several subfolders at once · Files: long-press for several",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -230,6 +269,190 @@ internal fun ExcludeFields(
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Multi-select subfolder picker for Quick copy. Android's system folder picker only returns one
+ * folder at a time, so after picking a parent folder the user can tick several subfolders at once,
+ * browse deeper into any subfolder, or add the current folder itself.
+ */
+@Composable
+internal fun MultiFolderPickerSheet(
+    picker: FolderPickerState,
+    isAdded: (String) -> Boolean,
+    onBrowseInto: (docId: String, name: String) -> Unit,
+    onBrowseUp: () -> Unit,
+    onConfirm: (Set<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val cs = MaterialTheme.colorScheme
+    var selected by remember(picker.rootTree, picker.currentDocId) { mutableStateOf(emptySet<String>()) }
+    val scroll = rememberScrollState()
+    LaunchedEffect(picker.currentDocId) { scroll.scrollTo(0) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = cs.surface,
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (picker.canGoUp) {
+                    IconButton(onClick = onBrowseUp) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Up")
+                    }
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        picker.currentName,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        if (picker.stack.size > 1) picker.stack.joinToString(" › ") { it.second }
+                        else "Tick folders to add, or add this whole folder",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            if (picker.loading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else if (picker.error != null) {
+                Text(
+                    picker.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.error,
+                )
+            } else if (picker.subfolders.isEmpty()) {
+                Text(
+                    "No subfolders inside \"${picker.currentName}\". Tap the button below to add this folder.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurfaceVariant,
+                )
+            } else {
+                val selectableIds = picker.subfolders.map { it.docId }.filterNot(isAdded)
+                val allSelected = selectableIds.isNotEmpty() && selectableIds.all { it in selected }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "${formatCount(picker.subfolders.size)} subfolder${if (picker.subfolders.size > 1) "s" else ""}" +
+                            if (selected.isNotEmpty()) " · ${formatCount(selected.size)} selected" else "",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = cs.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (selectableIds.isNotEmpty()) {
+                        TextButton(onClick = {
+                            selected = if (allSelected) emptySet() else selectableIds.toSet()
+                        }) {
+                            Text(if (allSelected) "Select none" else "Select all")
+                        }
+                    }
+                }
+
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .border(1.dp, cs.outlineVariant, RoundedCornerShape(14.dp))
+                        .verticalScroll(scroll)
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    picker.subfolders.forEach { entry ->
+                        val already = isAdded(entry.docId)
+                        val checked = entry.docId in selected
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    when {
+                                        checked -> cs.primary.copy(alpha = 0.08f)
+                                        else -> cs.surface
+                                    },
+                                )
+                                .clickable(enabled = !already) {
+                                    selected = if (checked) selected - entry.docId else selected + entry.docId
+                                }
+                                .padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = checked || already,
+                                enabled = !already,
+                                onCheckedChange = {
+                                    selected = if (checked) selected - entry.docId else selected + entry.docId
+                                },
+                            )
+                            Text("📁", fontSize = 16.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                entry.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                color = if (already) cs.onSurfaceVariant else cs.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (already) {
+                                Spacer(Modifier.width(6.dp))
+                                Badge("Added", Success)
+                            }
+                            IconButton(onClick = { onBrowseInto(entry.docId, entry.name) }) {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = "Open ${entry.name}",
+                                    tint = cs.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+                Spacer(Modifier.weight(1f))
+                Button(
+                    onClick = { onConfirm(selected) },
+                    enabled = !picker.loading,
+                    modifier = Modifier.height(48.dp),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Text(
+                        if (selected.isNotEmpty()) {
+                            "Add ${formatCount(selected.size)} folder${if (selected.size > 1) "s" else ""}"
+                        } else {
+                            "Add \"${picker.currentName}\" itself"
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }

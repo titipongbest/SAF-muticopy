@@ -88,6 +88,7 @@ import com.titipong.safmulticopy.PairDraft
 import com.titipong.safmulticopy.data.FolderPair
 import com.titipong.safmulticopy.engine.CopyState
 import com.titipong.safmulticopy.engine.Phase
+import com.titipong.safmulticopy.engine.Saf
 import com.titipong.safmulticopy.engine.TaskResult
 import com.titipong.safmulticopy.engine.TaskStatus
 import com.titipong.safmulticopy.ui.theme.Success
@@ -158,7 +159,7 @@ fun MainScreen(vm: MainViewModel) {
 
     // Quick copy pickers
     val pickSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) vm.addSource(uri)?.let { errorText = it }
+        if (uri != null) vm.openFolderPicker(uri)?.let { errorText = it }
     }
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (uris.isNotEmpty()) vm.addFiles(uris)?.let { errorText = it }
@@ -180,6 +181,21 @@ fun MainScreen(vm: MainViewModel) {
             if (ref == null) errorText = "Could not get permission for this folder."
             else editing = editing?.copy(destination = ref)
         }
+    }
+
+    var browserTarget by remember { mutableStateOf<BrowserTarget?>(null) }
+
+    fun launchSystemPicker(target: BrowserTarget) {
+        when (target) {
+            BrowserTarget.QUICK_SOURCES -> pickSource.launch(null)
+            BrowserTarget.QUICK_DEST -> pickDest.launch(null)
+            BrowserTarget.PAIR_SOURCE -> pickPairSource.launch(editing?.source?.uri?.takeUnless(Saf::isFileUri))
+            BrowserTarget.PAIR_DEST -> pickPairDest.launch(editing?.destination?.uri?.takeUnless(Saf::isFileUri))
+        }
+    }
+
+    fun openFolderChooser(target: BrowserTarget) {
+        if (vm.hasDateAccess) browserTarget = target else launchSystemPicker(target)
     }
 
     fun startQuick(dryRun: Boolean) {
@@ -337,15 +353,20 @@ fun MainScreen(vm: MainViewModel) {
                         folders = vm.sources,
                         files = vm.files,
                         enabled = !running,
-                        onAddFolder = { pickSource.launch(null) },
+                        onAddFolder = { openFolderChooser(BrowserTarget.QUICK_SOURCES) },
                         onAddFiles = { pickFiles.launch(arrayOf("*/*")) },
                         onRemoveFolder = vm::removeSource,
+                        onClearFolders = vm::clearSources,
                         onRemoveFile = vm::removeFile,
                         onClearFiles = vm::clearFiles,
                     )
                 }
                 item(key = "dest") {
-                    DestinationCard(vm.destination, enabled = !running, onPick = { pickDest.launch(null) })
+                    DestinationCard(
+                        vm.destination,
+                        enabled = !running,
+                        onPick = { openFolderChooser(BrowserTarget.QUICK_DEST) },
+                    )
                 }
                 statusItems()
                 item(key = "quick-options") { QuickOptionsCard(vm, enabled = !running) }
@@ -354,6 +375,17 @@ fun MainScreen(vm: MainViewModel) {
             item(key = "settings") { SettingsCard(vm, enabled = !running, onAllowDates = ::requestDateAccess) }
             item(key = "credit") { CreditFooter() }
         }
+    }
+
+    vm.folderPicker?.let { picker ->
+        MultiFolderPickerSheet(
+            picker = picker,
+            isAdded = { docId -> vm.isFolderAlreadyAdded(picker.rootTree, docId) },
+            onBrowseInto = vm::browsePickerInto,
+            onBrowseUp = vm::browsePickerUp,
+            onConfirm = vm::confirmFolderPicker,
+            onDismiss = vm::dismissFolderPicker,
+        )
     }
 
     viewing?.let { id ->
@@ -385,8 +417,8 @@ fun MainScreen(vm: MainViewModel) {
         PairEditorSheet(
             draft = draft,
             onChange = { editing = it },
-            onPickSource = { pickPairSource.launch(draft.source?.uri) },
-            onPickDest = { pickPairDest.launch(draft.destination?.uri) },
+            onPickSource = { openFolderChooser(BrowserTarget.PAIR_SOURCE) },
+            onPickDest = { openFolderChooser(BrowserTarget.PAIR_DEST) },
             onSave = {
                 val err = vm.savePair(draft)
                 if (err != null) errorText = err else editing = null
@@ -403,6 +435,31 @@ fun MainScreen(vm: MainViewModel) {
                 vm.discardDraft()
                 editing = null
             },
+        )
+    }
+
+    browserTarget?.let { target ->
+        StorageBrowserSheet(
+            target = target,
+            isAdded = vm::isFileFolderAdded,
+            onPickMulti = { dirs ->
+                vm.addFileSources(dirs)
+                browserTarget = null
+            },
+            onPickSingle = { dir ->
+                when (target) {
+                    BrowserTarget.QUICK_DEST -> vm.setFileDestination(dir)
+                    BrowserTarget.PAIR_SOURCE -> editing = editing?.copy(source = vm.pickPairFileFolder(dir))
+                    BrowserTarget.PAIR_DEST -> editing = editing?.copy(destination = vm.pickPairFileFolder(dir))
+                    BrowserTarget.QUICK_SOURCES -> vm.addFileSources(listOf(dir))
+                }
+                browserTarget = null
+            },
+            onUseSystemPicker = {
+                browserTarget = null
+                launchSystemPicker(target)
+            },
+            onDismiss = { browserTarget = null },
         )
     }
 

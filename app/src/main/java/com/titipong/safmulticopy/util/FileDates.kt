@@ -24,8 +24,9 @@ object FileDates {
                 PackageManager.PERMISSION_GRANTED
         }
 
-    /** Real file behind a SAF document, e.g. "primary:DCIM/a.jpg" -> /storage/emulated/0/DCIM/a.jpg */
+    /** Real file behind a SAF document or file:// URI, e.g. "primary:DCIM/a.jpg" -> /storage/emulated/0/DCIM/a.jpg */
     fun fileFor(docUri: Uri): File? {
+        if (docUri.scheme == "file") return docUri.path?.let(::File)
         val id = runCatching { DocumentsContract.getDocumentId(docUri) }.getOrNull() ?: return null
         if (id.startsWith("raw:")) return File(id.removePrefix("raw:"))
         if (docUri.authority != "com.android.externalstorage.documents") return null

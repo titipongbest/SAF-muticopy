@@ -24,9 +24,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedWriter
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -671,20 +673,27 @@ class CopyEngine(
                 } else {
                     try {
                         val r = runner!!
-                        var doneDirect = false
-                        if (hasAllFilesAccess && !directBlocked) {
-                            val f = FileDates.fileFor(Saf.docUri(destTree, del.docId))
-                            if (f != null) {
-                                doneDirect = deleteDirect(f, del.isDir, label, r)
-                                if (doneDirect) {
-                                    directDeletes++
-                                } else {
-                                    directFailures++
-                                    if (directDeletes == 0 && directFailures >= 3) directBlocked = true
+                        if (Saf.isFileUri(destTree)) {
+                            val f = File(del.docId)
+                            if (!deleteDirect(f, del.isDir, label, r)) {
+                                throw IOException("cannot delete ${f.name}")
+                            }
+                        } else {
+                            var doneDirect = false
+                            if (hasAllFilesAccess && !directBlocked) {
+                                val f = FileDates.fileFor(Saf.docUri(destTree, del.docId))
+                                if (f != null) {
+                                    doneDirect = deleteDirect(f, del.isDir, label, r)
+                                    if (doneDirect) {
+                                        directDeletes++
+                                    } else {
+                                        directFailures++
+                                        if (directDeletes == 0 && directFailures >= 3) directBlocked = true
+                                    }
                                 }
                             }
+                            if (!doneDirect) deleteViaSaf(del, destTree, label, r)
                         }
-                        if (!doneDirect) deleteViaSaf(del, destTree, label, r)
                         deleted.incrementAndGet()
                         log("  − Deleted $what: $label", Level.WARN)
                         event(EventKind.DELETED, label, 0, if (del.isDir) "whole folder" else null)
@@ -772,12 +781,19 @@ class CopyEngine(
 
     private suspend fun createFolders(p: Plan, destTree: Uri, destRootId: String) {
         val ids = p.target.dirIds
+        val direct = Saf.isFileUri(destTree)
         if (!ids.containsKey("")) {
             try {
-                val uri = DocumentsContract.createDocument(
-                    cr, Saf.docUri(destTree, destRootId), Document.MIME_TYPE_DIR, p.target.name,
-                ) ?: throw IOException("provider returned nothing")
-                ids[""] = DocumentsContract.getDocumentId(uri)
+                ids[""] = if (direct) {
+                    val dir = File(destRootId, p.target.name)
+                    if (!dir.isDirectory && !dir.mkdirs()) throw IOException("cannot create folder")
+                    dir.absolutePath
+                } else {
+                    val uri = DocumentsContract.createDocument(
+                        cr, Saf.docUri(destTree, destRootId), Document.MIME_TYPE_DIR, p.target.name,
+                    ) ?: throw IOException("provider returned nothing")
+                    DocumentsContract.getDocumentId(uri)
+                }
             } catch (e: Exception) {
                 log("  ✖ Cannot create folder ${p.target.name} — ${e.message}", Level.ERROR)
                 return
@@ -788,11 +804,18 @@ class CopyEngine(
             val key = rel.lowercase()
             if (ids.containsKey(key)) continue
             val parentId = ids[Saf.parentKey(key)] ?: continue
+            val name = rel.substringAfterLast('/')
             try {
-                val uri = DocumentsContract.createDocument(
-                    cr, Saf.docUri(destTree, parentId), Document.MIME_TYPE_DIR, rel.substringAfterLast('/'),
-                ) ?: throw IOException("provider returned nothing")
-                ids[key] = DocumentsContract.getDocumentId(uri)
+                ids[key] = if (direct) {
+                    val dir = File(parentId, name)
+                    if (!dir.isDirectory && !dir.mkdirs()) throw IOException("cannot create folder")
+                    dir.absolutePath
+                } else {
+                    val uri = DocumentsContract.createDocument(
+                        cr, Saf.docUri(destTree, parentId), Document.MIME_TYPE_DIR, name,
+                    ) ?: throw IOException("provider returned nothing")
+                    DocumentsContract.getDocumentId(uri)
+                }
             } catch (e: Exception) {
                 log("  ✖ Cannot create folder ${label(p.target, rel)} — ${e.message}", Level.ERROR)
             }
@@ -856,9 +879,19 @@ class CopyEngine(
         }
     }
 
+    private fun openSource(uri: Uri): InputStream =
+        if (Saf.isFileUri(uri)) FileInputStream(Saf.fileOf(uri) ?: throw IOException("cannot open source"))
+        else cr.openInputStream(uri) ?: throw IOException("cannot open source")
+
     private suspend fun copyOne(job: CopyJob, buf: ByteArray, onBytes: (Int) -> Unit) {
         val destTree = job.target.destTree
         val parentId = job.target.dirIds[job.parentKey] ?: throw IOException("destination folder is missing")
+
+        if (Saf.isFileUri(destTree)) {
+            if (!copyDirect(job, parentId, buf, onBytes)) throw IOException("cannot write to destination folder")
+            job.existingDocId = null
+            return
+        }
 
         // Replace = delete + create. Opening the old file with "w" does not truncate on every provider.
         job.existingDocId?.let { id ->
@@ -898,8 +931,7 @@ class CopyEngine(
         var ok = false
         try {
             val ctx = currentCoroutineContext()
-            cr.openInputStream(job.srcUri).use { input ->
-                if (input == null) throw IOException("cannot open source")
+            openSource(job.srcUri).use { input ->
                 cr.openOutputStream(out, "w").use { output ->
                     if (output == null) throw IOException("cannot open destination")
                     while (true) {
@@ -929,19 +961,20 @@ class CopyEngine(
     }
 
     /**
-     * Fallback: copy to the real path of the destination folder (needs All files access).
+     * Copies to the real path of the destination folder (used directly for file:// destinations,
+     * and as a fallback when SAF fails on some USB drives / SD cards).
      * Returns false when that isn't possible, so the original error is reported.
      */
     private suspend fun copyDirect(job: CopyJob, parentId: String, buf: ByteArray, onBytes: (Int) -> Unit): Boolean {
-        if (!hasAllFilesAccess) return false
+        val isDirectDest = Saf.isFileUri(job.target.destTree)
+        if (!hasAllFilesAccess && !isDirectDest) return false
         val dir = FileDates.fileFor(Saf.docUri(job.target.destTree, parentId)) ?: return false
         if (!dir.isDirectory && !dir.mkdirs()) throw IOException("cannot create folder ${dir.path}")
         val outFile = File(dir, job.src.name)
         var ok = false
         try {
             val ctx = currentCoroutineContext()
-            cr.openInputStream(job.srcUri).use { input ->
-                if (input == null) throw IOException("cannot open source")
+            openSource(job.srcUri).use { input ->
                 FileOutputStream(outFile).use { output ->
                     while (true) {
                         ctx.ensureActive()
@@ -960,7 +993,7 @@ class CopyEngine(
             datesNotKept.incrementAndGet()
         }
         toScan += outFile.path // written without the storage service, so the gallery doesn't know it yet
-        if (directWrites.getAndIncrement() == 0) {
+        if (!isDirectDest && directWrites.getAndIncrement() == 0) {
             log("  ℹ The storage service couldn't create files here — writing directly to ${dir.path}", Level.INFO)
         }
         return true

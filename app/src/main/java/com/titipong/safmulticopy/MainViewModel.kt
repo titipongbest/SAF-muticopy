@@ -19,6 +19,7 @@ import com.titipong.safmulticopy.engine.CopyManager
 import com.titipong.safmulticopy.engine.CopyRequest
 import com.titipong.safmulticopy.engine.CopyState
 import com.titipong.safmulticopy.engine.CopyTask
+import com.titipong.safmulticopy.engine.DocEntry
 import com.titipong.safmulticopy.engine.GlobSet
 import com.titipong.safmulticopy.engine.Saf
 import com.titipong.safmulticopy.util.FileDates
@@ -26,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 
 data class FolderRef(
@@ -35,6 +37,20 @@ data class FolderRef(
     val isFile: Boolean = false,
     val size: Long = 0,
 )
+
+/** State of the multi-folder picker sheet in Quick copy. */
+data class FolderPickerState(
+    val rootTree: Uri,
+    /** Navigation stack of (docId, name); the last entry is the folder currently being browsed. */
+    val stack: List<Pair<String, String>>,
+    val loading: Boolean = false,
+    val subfolders: List<DocEntry> = emptyList(),
+    val error: String? = null,
+) {
+    val currentDocId: String get() = stack.last().first
+    val currentName: String get() = stack.last().second
+    val canGoUp: Boolean get() = stack.size > 1
+}
 
 /** What the pair editor is working on (not saved until Save). */
 data class PairDraft(
@@ -92,6 +108,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var grants by mutableStateOf(Grants())
         private set
 
+    var folderPicker by mutableStateOf<FolderPickerState?>(null)
+        private set
+
     val state: StateFlow<CopyState> = CopyManager.state
     val pairs: StateFlow<List<FolderPair>> = pairStore.pairs
 
@@ -102,9 +121,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshGrants()
         // Only restore what we still have permission for (the user may have revoked it).
         val granted = grants.read
-        val restoredSources = settings.sources.map(Uri::parse).filter { it in granted || isOwn(it) }
+        val restoredSources = settings.sources.map(Uri::parse).filter { hasAccessTo(it, needWrite = false) }
         val restoredFiles = settings.files.map(Uri::parse).filter { it in granted || isOwn(it) }
-        val restoredDest = settings.destination?.let(Uri::parse)?.takeIf { it in granted || isOwn(it) }
+        val restoredDest = settings.destination?.let(Uri::parse)?.takeIf { hasAccessTo(it, needWrite = false) }
 
         // Populate immediately using URI strings (zero IPC) so slow/stalled OTG never freezes startup.
         restoredSources.forEach { sources += describeFast(it) }
@@ -149,14 +168,151 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addSource(uri: Uri): String? {
         if (!takePermission(uri)) return "Could not get permission for this folder."
-        if (sources.none { it.uri == uri }) sources += describe(uri)
+        if (sources.none { sameFolder(it.uri, uri) }) sources += describe(uri)
         save()
         return null
+    }
+
+    /**
+     * Called when the user picks a folder in Quick copy. If the folder has subfolders, opens a
+     * multi-select sheet so several subfolders can be ticked at once (or the folder itself added).
+     * Leaf folders with no subfolders are added immediately without an extra dialog.
+     */
+    fun openFolderPicker(treeUri: Uri): String? {
+        if (!takePermission(treeUri)) return "Could not get permission for this folder."
+        val rootDocId = runCatching { Saf.rootId(treeUri) }.getOrNull()
+            ?: return "Could not read this folder."
+        viewModelScope.launch(Dispatchers.IO) {
+            val rootName = Saf.displayName(cr, treeUri) ?: Saf.fallbackName(treeUri)
+            val subs = runCatching {
+                Saf.listChildren(cr, treeUri, rootDocId)
+                    .filter { it.isDir }
+                    .sortedBy { it.name.lowercase() }
+            }.getOrNull()
+            withContext(Dispatchers.Main) {
+                if (subs.isNullOrEmpty()) {
+                    if (sources.none { sameFolder(it.uri, treeUri) }) {
+                        sources += FolderRef(treeUri, rootName, Saf.locationLabel(treeUri))
+                    }
+                    save()
+                    refreshGrants()
+                } else {
+                    folderPicker = FolderPickerState(
+                        rootTree = treeUri,
+                        stack = listOf(rootDocId to rootName),
+                        loading = false,
+                        subfolders = subs,
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    fun browsePickerInto(docId: String, name: String) {
+        val cur = folderPicker ?: return
+        val nextStack = cur.stack + (docId to name)
+        folderPicker = cur.copy(stack = nextStack, loading = true, subfolders = emptyList(), error = null)
+        loadPickerChildren(cur.rootTree, docId)
+    }
+
+    fun browsePickerUp() {
+        val cur = folderPicker ?: return
+        if (!cur.canGoUp) return
+        val nextStack = cur.stack.dropLast(1)
+        val targetId = nextStack.last().first
+        folderPicker = cur.copy(stack = nextStack, loading = true, subfolders = emptyList(), error = null)
+        loadPickerChildren(cur.rootTree, targetId)
+    }
+
+    private fun loadPickerChildren(rootTree: Uri, docId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val res = runCatching {
+                Saf.listChildren(cr, rootTree, docId)
+                    .filter { it.isDir }
+                    .sortedBy { it.name.lowercase() }
+            }
+            withContext(Dispatchers.Main) {
+                val now = folderPicker ?: return@withContext
+                if (now.rootTree != rootTree || now.currentDocId != docId) return@withContext
+                folderPicker = res.fold(
+                    onSuccess = { now.copy(loading = false, subfolders = it, error = null) },
+                    onFailure = { now.copy(loading = false, error = it.message ?: "Could not open folder") },
+                )
+            }
+        }
+    }
+
+    fun isFolderAlreadyAdded(rootTree: Uri, docId: String): Boolean {
+        val uri = Saf.docUri(rootTree, docId)
+        return sources.any { sameFolder(it.uri, uri) }
+    }
+
+    /** Adds all ticked subfolders, or the currently viewed folder itself when nothing is ticked. */
+    fun confirmFolderPicker(selectedDocIds: Set<String>) {
+        val picker = folderPicker ?: return
+        folderPicker = null
+        val rootDocId = runCatching { DocumentsContract.getTreeDocumentId(picker.rootTree) }.getOrNull()
+        if (selectedDocIds.isEmpty()) {
+            val uri = if (picker.currentDocId == rootDocId) picker.rootTree
+            else Saf.docUri(picker.rootTree, picker.currentDocId)
+            if (sources.none { sameFolder(it.uri, uri) }) {
+                sources += FolderRef(uri, picker.currentName, Saf.locationLabel(uri))
+            }
+        } else {
+            for (entry in picker.subfolders) {
+                if (entry.docId !in selectedDocIds) continue
+                val uri = Saf.docUri(picker.rootTree, entry.docId)
+                if (sources.none { sameFolder(it.uri, uri) }) {
+                    sources += FolderRef(uri, entry.name, Saf.locationLabel(uri))
+                }
+            }
+        }
+        save()
+        releaseIfUnused(picker.rootTree)
+        refreshGrants()
+    }
+
+    fun dismissFolderPicker() {
+        val picker = folderPicker ?: return
+        folderPicker = null
+        releaseIfUnused(picker.rootTree)
+        refreshGrants()
     }
 
     fun removeSource(ref: FolderRef) {
         sources.remove(ref)
         releaseIfUnused(ref.uri)
+        save()
+    }
+
+    fun clearSources() {
+        val old = sources.toList()
+        sources.clear()
+        old.forEach { releaseIfUnused(it.uri) }
+        save()
+    }
+
+    fun isFileFolderAdded(dir: File): Boolean {
+        val uri = Uri.fromFile(dir)
+        return sources.any { sameFolder(it.uri, uri) }
+    }
+
+    fun addFileSources(dirs: List<File>) {
+        for (dir in dirs) {
+            val uri = Uri.fromFile(dir)
+            if (sources.none { sameFolder(it.uri, uri) }) {
+                sources += describeFast(uri)
+            }
+        }
+        save()
+    }
+
+    fun setFileDestination(dir: File) {
+        val uri = Uri.fromFile(dir)
+        val old = destination
+        destination = describeFast(uri)
+        if (old != null && old.uri != uri) releaseIfUnused(old.uri)
         save()
     }
 
@@ -246,8 +402,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     "That would copy the folder into itself — choose a destination outside it."
             }
             if (s.uri.authority != dest.uri.authority) continue
-            val sId = runCatching { DocumentsContract.getTreeDocumentId(s.uri) }.getOrNull() ?: continue
-            val dId = runCatching { DocumentsContract.getTreeDocumentId(dest.uri) }.getOrNull() ?: continue
+            val sId = runCatching { Saf.rootId(s.uri) }.getOrNull() ?: continue
+            val dId = runCatching { Saf.rootId(dest.uri) }.getOrNull() ?: continue
             val target = if (dId.endsWith(":")) dId + s.name else "$dId/${s.name}"
             if (target.equals(sId, true)) {
                 return "\"${s.name}\" would be copied onto itself. Choose a different destination."
@@ -286,8 +442,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------ folder pairs
 
+    private fun hasAccessTo(uri: Uri, needWrite: Boolean): Boolean = when {
+        Saf.isFileUri(uri) -> hasDateAccess
+        isOwn(uri) -> true
+        needWrite -> Saf.treeUriOf(uri) in grants.write
+        else -> Saf.treeUriOf(uri) in grants.read
+    }
+
     fun canAccess(p: FolderPair): Boolean =
-        (p.sourceUri in grants.read || isOwn(p.sourceUri)) && (p.destUri in grants.write || isOwn(p.destUri))
+        hasAccessTo(p.sourceUri, needWrite = false) && hasAccessTo(p.destUri, needWrite = true)
 
     /**
      * Folders from this app's own document provider need no granted permission. Only debug builds
@@ -313,11 +476,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return describe(uri)
     }
 
+    fun pickPairFileFolder(dir: File): FolderRef = describeFast(Uri.fromFile(dir))
+
     fun validateDraft(d: PairDraft): String? {
         val src = d.source ?: return "Choose a source folder."
         val dst = d.destination ?: return "Choose a destination folder."
-        if (dst.uri !in grants.write) {
+        if (!hasAccessTo(dst.uri, needWrite = true)) {
             return "This app can't write to \"${dst.name}\". Pick the destination folder again."
+        }
+        if (d.mirror && Saf.isInternalStorageRoot(dst.uri)) {
+            return "Mirror mode cannot target Internal storage root — it would delete your system and personal folders. Choose a subfolder or use Merge mode."
         }
         if (Saf.isSameOrInside(src.uri, dst.uri) || Saf.isSameOrInside(dst.uri, src.uri)) {
             return "The source and destination can't be the same folder or inside each other."
@@ -437,11 +605,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun releaseIfUnused(uri: Uri) {
-        if (sources.any { it.uri == uri } || destination?.uri == uri) return
-        if (pairs.value.any { it.sourceUri == uri || it.destUri == uri }) return
-        if (runCatching { cr.releasePersistableUriPermission(uri, rw) }.isFailure) {
-            runCatching { cr.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+        if (Saf.isFileUri(uri)) return
+        val tree = Saf.treeUriOf(uri)
+        if (sources.any { Saf.treeUriOf(it.uri) == tree } || destination?.uri?.let(Saf::treeUriOf) == tree) return
+        if (pairs.value.any { Saf.treeUriOf(it.sourceUri) == tree || Saf.treeUriOf(it.destUri) == tree }) return
+        if (runCatching { cr.releasePersistableUriPermission(tree, rw) }.isFailure) {
+            runCatching { cr.releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         }
+    }
+
+    private fun sameFolder(a: Uri, b: Uri): Boolean {
+        if (a == b) return true
+        if (Saf.isFileUri(a) && Saf.isFileUri(b)) {
+            return a.path?.trimEnd('/').equals(b.path?.trimEnd('/'), ignoreCase = true)
+        }
+        if (a.scheme != b.scheme || a.authority != b.authority) return false
+        val aId = runCatching { Saf.rootId(a) }.getOrNull() ?: return false
+        val bId = runCatching { Saf.rootId(b) }.getOrNull() ?: return false
+        return aId.equals(bId, ignoreCase = true)
     }
 
     private fun describeFile(uri: Uri): FolderRef? {
